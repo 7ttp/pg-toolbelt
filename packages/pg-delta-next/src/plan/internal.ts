@@ -31,6 +31,12 @@ export function buildActionGraph(
   destroyerOf: ReadonlyMap<string, number>,
   source: FactBase,
   desired: FactBase,
+  // actions that rename a subtree in place. A rename changes IDENTITY, not
+  // ownership: PostgreSQL preserves the owner OID across `ALTER … RENAME`, and a
+  // separate owner action handles any real change. So `owner` edges on a
+  // renamed subtree must NOT drive ordering through the rename — otherwise a
+  // table rename + owner-role rename deadlock each other (review P1 #2).
+  renameActionIndices: ReadonlySet<number> = new Set(),
 ): Array<[number, number]> {
   const edges: Array<[number, number]> = [];
 
@@ -97,6 +103,10 @@ export function buildActionGraph(
       remember(id);
       if (!desired.has(id)) continue;
       for (const edge of desired.outgoingEdges(id)) {
+        // a rename does not CREATE the owner edge (PG carries the owner across
+        // RENAME); ordering the new owner's producer before the rename would,
+        // paired with the source-side teardown edge below, form a cycle (P1 #2)
+        if (edge.kind === "owner" && renameActionIndices.has(index)) continue;
         const targetKey = remember(edge.to);
         const producer = producerOf.get(targetKey);
         if (producer !== undefined && producer !== index) {
@@ -143,6 +153,10 @@ export function buildActionGraph(
       if (!source.has(id)) continue;
       for (const edge of source.edges) {
         if (encodeId(edge.to) !== key) continue;
+        // symmetric to the produces side: a rename does not TEAR DOWN the owner
+        // edge, so an owner edge into the renamed subtree must not order the
+        // owner's dependent teardown before the rename (P1 #2 cycle)
+        if (edge.kind === "owner" && renameActionIndices.has(index)) continue;
         const dependentKey = remember(edge.from);
         const dependentDestroyer = destroyerOf.get(dependentKey);
         if (dependentDestroyer !== undefined && dependentDestroyer !== index) {

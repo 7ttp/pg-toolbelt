@@ -468,7 +468,12 @@ export function plan(
   };
 
   // renames: one action renames the whole subtree — produces every new
-  // id, destroys every old id; dependents order against those sets
+  // id, destroys every old id; dependents order against those sets.
+  // Tracked so buildActionGraph can treat them as identity-only: a rename
+  // does NOT establish or tear down the owner edge (PostgreSQL preserves the
+  // owner across RENAME), so owner edges on the renamed subtree must not drive
+  // graph ordering through the rename (review P1 #2: rename/rename cycle).
+  const renameActionIndices = new Set<number>();
   for (const { from, to } of acceptedRenames) {
     const rename = rulesFor(from.id.kind).rename;
     if (rename === undefined) {
@@ -476,11 +481,13 @@ export function plan(
         `rename: kind '${from.id.kind}' matched as candidate but has no rename rule`,
       );
     }
-    pushAction("alter", rename(from, to.id), {
-      produces: subtreeIds(desired, to.id),
-      destroys: subtreeIds(source, from.id),
-      consumes: to.parent !== undefined ? [to.parent] : [],
-    });
+    renameActionIndices.add(
+      pushAction("alter", rename(from, to.id), {
+        produces: subtreeIds(desired, to.id),
+        destroys: subtreeIds(source, from.id),
+        consumes: to.parent !== undefined ? [to.parent] : [],
+      }),
+    );
   }
 
   // creates — parents first, so a parent's delta-set inlining (e.g. a
@@ -511,14 +518,21 @@ export function plan(
 
   // default-privilege hygiene: objects created under active default ACLs
   // receive implicit grants; revoke them when the desired state has no
-  // corresponding acl fact (pg_dump-style clean slate)
+  // corresponding acl fact (pg_dump-style clean slate).
+  // EMISSION reads the PROJECTED plan target, not full `desired` (review P1 #3):
+  // a policy can filter the default-privilege add AND its grantee role, and the
+  // hygiene REVOKE must not surface a filtered-away role (which would then fail
+  // the planner's own missing-requirement check). Mirrors the create/alter seam.
   for (const fact of added.values()) {
     // which pg_default_acl objtype this kind maps to is declared per-kind
     // in the rule table (`defaclObjtype`); absent → no default ACLs
     const objtype = ruleFlag(fact.id.kind, "defaclObjtype");
     if (objtype === undefined) continue;
+    // a created object whose fact is absent from the projected target (its add
+    // was effectively reverted) has no hygiene to do
+    if (!projectedDesired.has(fact.id)) continue;
     // owner is now an edge, not a payload field (move 2)
-    const ownerEdge = desired
+    const ownerEdge = projectedDesired
       .outgoingEdges(fact.id)
       .find((e) => e.kind === "owner");
     const owner =
@@ -527,7 +541,7 @@ export function plan(
         : undefined;
     if (typeof owner !== "string") continue;
     const schema = (fact.id as { schema?: string }).schema ?? null;
-    for (const dp of desired.facts()) {
+    for (const dp of projectedDesired.facts()) {
       if (dp.id.kind !== "defaultPrivilege") continue;
       const dpid = dp.id as {
         role: string;
@@ -543,7 +557,10 @@ export function plan(
         target: fact.id,
         grantee: dpid.grantee,
       };
-      if (desired.has(aclId)) continue; // acl create's REVOKE-first handles it
+      // an explicit acl in the PROJECTED target recreates the grant with a
+      // REVOKE-first, so hygiene would be redundant (and a filtered acl is
+      // correctly absent here → hygiene still fires)
+      if (projectedDesired.has(aclId)) continue;
       pushAction(
         "alter",
         {
@@ -650,13 +667,32 @@ export function plan(
       if (delta.verb !== "unlink" || delta.edge.kind !== "owner") continue;
       oldOwnerByFact.set(encodeId(delta.edge.from), delta.edge.to);
     }
+    // An accepted ROLE rename moves an owner's name: `old → new`. A table owned
+    // by `old` and renamed alongside keeps the SAME owner OID, which surfaces in
+    // `desired` as `new` — so the owner is CARRIED by the two renames, not
+    // changed. Map source role name → dest role name to recognize that.
+    const roleRenameMap = new Map<string, string>();
+    for (const { from, to } of acceptedRenames) {
+      if (from.id.kind === "role" && to.id.kind === "role") {
+        roleRenameMap.set(
+          (from.id as { name: string }).name,
+          (to.id as { name: string }).name,
+        );
+      }
+    }
     // Accepted renames carry ownership: `ALTER … RENAME` never changes the
     // owner, so the renamed subtree's owner edge resurfaces as a fresh link in
     // the desired base even when nothing changed. Map each renamed-to id to the
-    // owner its rename-from counterpart held in source; an unchanged owner emits
-    // no action (the rename carries it), a genuinely changed owner still does.
+    // owner its rename-from counterpart held in source — projected THROUGH any
+    // accepted role rename, so a table+owner-role pair both renamed reads as an
+    // unchanged owner (the renames carry it; no `ALTER … OWNER TO`, and no
+    // rename/rename cycle — review P1 #2). A genuinely changed owner still emits.
     // Subtree ids zip by index — the rename matched on a structural rollup.
     const renamedOwner = new Map<string, string | null>();
+    // and the OLD owner's StableId, so a genuinely-changed owner's link action
+    // can `releases` it (the source-side unlink is keyed by the OLD id, which the
+    // destination link never looks up — review P1 #1: drop old role too early).
+    const renamedOwnerId = new Map<string, StableId>();
     for (const { from, to } of acceptedRenames) {
       const srcIds = subtreeIds(source, from.id);
       const dstIds = subtreeIds(desired, to.id);
@@ -667,12 +703,16 @@ export function plan(
         const ownerEdge = source
           .outgoingEdges(srcId)
           .find((e) => e.kind === "owner");
+        if (ownerEdge?.to.kind !== "role") {
+          renamedOwner.set(encodeId(dstId), null);
+          continue;
+        }
+        const srcOwnerName = (ownerEdge.to as { name: string }).name;
         renamedOwner.set(
           encodeId(dstId),
-          ownerEdge?.to.kind === "role"
-            ? (ownerEdge.to as { kind: "role"; name: string }).name
-            : null,
+          roleRenameMap.get(srcOwnerName) ?? srcOwnerName,
         );
+        renamedOwnerId.set(encodeId(dstId), ownerEdge.to);
       }
     }
     for (const delta of deltas) {
@@ -710,7 +750,12 @@ export function plan(
           `capability: cannot set owner of ${encodeId(objId)} to role "${roleName}" — applier "${options.capability.role}" is not a superuser or a member of that role; grant membership or apply as a member/superuser`,
         );
       }
-      const oldRoleId = oldOwnerByFact.get(objKey);
+      // for an accepted rename the source-side owner unlink is keyed by the OLD
+      // id, so `oldOwnerByFact` (keyed by the link's `from`, i.e. the NEW id) has
+      // no entry — fall back to the owner the renamed subtree carried in source
+      // (review P1 #1), so the release edge orders this before the old role drop.
+      const oldRoleId =
+        oldOwnerByFact.get(objKey) ?? renamedOwnerId.get(objKey);
       pushAction(
         "alter",
         {
@@ -733,6 +778,7 @@ export function plan(
     destroyerOf,
     source,
     desired,
+    renameActionIndices,
   );
 
   const order = topoSort(

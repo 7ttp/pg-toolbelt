@@ -7,11 +7,57 @@
 import { readFileSync } from "node:fs";
 import { parsePlan } from "../../plan/artifact.ts";
 import { rel } from "../../plan/render.ts";
-import { provePlan } from "../../proof/prove.ts";
+import { provePlan, type ProofVerdict } from "../../proof/prove.ts";
 import { loadSnapshot } from "../../frontends/snapshot-file.ts";
 import { encodeId } from "../../core/stable-id.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
+
+/**
+ * Render a failing `ProofVerdict` as an indented, human-readable report (the
+ * lines printed after "Proof FAILED."). Pure + exported so the CLI output is
+ * testable without a database. Every category the verdict can fail on gets a
+ * block — apply error, drift, data violations, AND rewrite violations — so a
+ * proof failure is always self-explanatory (review P2: rewrite-only failures
+ * used to print just "Proof FAILED.").
+ */
+export function formatProofFailure(verdict: ProofVerdict): string {
+  const lines: string[] = [];
+  if (verdict.applyError) {
+    lines.push(
+      `  apply error at action[${verdict.applyError.actionIndex}]: ${verdict.applyError.message}`,
+    );
+  }
+  if (verdict.driftDeltas.length > 0) {
+    lines.push(`  drift deltas (${verdict.driftDeltas.length}):`);
+    for (const d of verdict.driftDeltas) {
+      const id =
+        d.verb === "add" || d.verb === "remove"
+          ? encodeId(d.fact.id)
+          : d.verb === "set"
+            ? encodeId(d.id)
+            : encodeId(d.edge.from);
+      lines.push(`    ${d.verb} ${id}`);
+    }
+  }
+  if (verdict.dataViolations.length > 0) {
+    lines.push(`  data violations (${verdict.dataViolations.length}):`);
+    for (const v of verdict.dataViolations) {
+      lines.push(
+        `    ${rel(v.table.schema, v.table.name)}: before=${v.before} after=${v.after}`,
+      );
+    }
+  }
+  if (verdict.rewriteViolations.length > 0) {
+    lines.push(`  rewrite violations (${verdict.rewriteViolations.length}):`);
+    for (const v of verdict.rewriteViolations) {
+      lines.push(
+        `    ${rel(v.table.schema, v.table.name)}: relfilenode changed, no rewriteRisk declared`,
+      );
+    }
+  }
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
 
 export async function cmdProve(args: string[]): Promise<void> {
   let parsed;
@@ -57,35 +103,7 @@ export async function cmdProve(args: string[]): Promise<void> {
       );
     } else {
       process.stderr.write("Proof FAILED.\n");
-      if (verdict.applyError) {
-        process.stderr.write(
-          `  apply error at action[${verdict.applyError.actionIndex}]: ${verdict.applyError.message}\n`,
-        );
-      }
-      if (verdict.driftDeltas.length > 0) {
-        process.stderr.write(
-          `  drift deltas (${verdict.driftDeltas.length}):\n`,
-        );
-        for (const d of verdict.driftDeltas) {
-          const id =
-            d.verb === "add" || d.verb === "remove"
-              ? encodeId(d.fact.id)
-              : d.verb === "set"
-                ? encodeId(d.id)
-                : encodeId(d.edge.from);
-          process.stderr.write(`    ${d.verb} ${id}\n`);
-        }
-      }
-      if (verdict.dataViolations.length > 0) {
-        process.stderr.write(
-          `  data violations (${verdict.dataViolations.length}):\n`,
-        );
-        for (const v of verdict.dataViolations) {
-          process.stderr.write(
-            `    ${rel(v.table.schema, v.table.name)}: before=${v.before} after=${v.after}\n`,
-          );
-        }
-      }
+      process.stderr.write(formatProofFailure(verdict));
       process.exit(1);
     }
   } finally {
