@@ -12,6 +12,7 @@ import { apply } from "../src/apply/apply.ts";
 import { encodeId } from "../src/core/stable-id.ts";
 import { extract } from "../src/extract/extract.ts";
 import { plan } from "../src/plan/plan.ts";
+import { rel } from "../src/plan/render.ts";
 import { provePlan } from "../src/proof/prove.ts";
 import { loadCorpus, type Scenario } from "./corpus.ts";
 import {
@@ -85,11 +86,15 @@ async function proveOn(
           )
           .join("\n");
         const data = verdict.dataViolations
-          .map((v) => `  ${v.table}: ${v.before} -> ${v.after} rows`)
+          .map(
+            (v) =>
+              `  ${rel(v.table.schema, v.table.name)}: ${v.before} -> ${v.after} rows`,
+          )
           .join("\n");
         const rewrites = verdict.rewriteViolations
           .map(
-            (v) => `  ${v.table}: relfilenode changed, no rewriteRisk declared`,
+            (v) =>
+              `  ${rel(v.table.schema, v.table.name)}: relfilenode changed, no rewriteRisk declared`,
           )
           .join("\n");
         throw new Error(

@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { parsePlan } from "../../plan/artifact.ts";
+import { rel } from "../../plan/render.ts";
 import { provePlan } from "../../proof/prove.ts";
 import { loadSnapshot } from "../../frontends/snapshot-file.ts";
 import { encodeId } from "../../core/stable-id.ts";
@@ -81,7 +82,7 @@ export async function cmdProve(args: string[]): Promise<void> {
         );
         for (const v of verdict.dataViolations) {
           process.stderr.write(
-            `    ${v.table}: before=${v.before} after=${v.after}\n`,
+            `    ${rel(v.table.schema, v.table.name)}: before=${v.before} after=${v.after}\n`,
           );
         }
       }

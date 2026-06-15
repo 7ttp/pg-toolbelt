@@ -20,6 +20,14 @@ import { projectTarget } from "../plan/project.ts";
 import { resolveView, type Policy } from "../policy/policy.ts";
 import type { ApplierCapability } from "../policy/capability.ts";
 
+/** Structured table identity on the verdict: a collision-free { schema, name }
+ *  (NOT a dotted string — identifiers can contain dots, review P2). Consumers
+ *  render it with render.ts `rel()` for a properly-quoted, copy-pasteable ref. */
+export interface TableRef {
+  schema: string;
+  name: string;
+}
+
 export interface ProofVerdict {
   ok: boolean;
   applyError?: { actionIndex: number; sql: string; message: string };
@@ -28,7 +36,7 @@ export interface ProofVerdict {
    *  plan did NOT touch) content changed though the count held — drop+recreate
    *  masquerading as preservation, or an undeclared destructive operation */
   dataViolations: Array<{
-    table: string;
+    table: TableRef;
     before: number;
     after: number;
     /** count held but row CONTENT changed on an untouched table (review #3) */
@@ -36,14 +44,14 @@ export interface ProofVerdict {
   }>;
   /** a kept table that was physically rewritten (relfilenode changed)
    *  under no action declaring rewriteRisk — the rule under-declared */
-  rewriteViolations: Array<{ table: string }>;
+  rewriteViolations: Array<{ table: TableRef }>;
   /** what the proof actually verified, per table — honest coverage instead of
    *  a bare boolean (review #3). `ok` is backed by this. */
   coverage: ProofCoverage;
 }
 
 export interface TableCoverage {
-  table: string;
+  table: TableRef;
   /** how this table's data was checked:
    *  - "fingerprint": non-empty + untouched by the plan → full content compared
    *  - "count": non-empty but the plan alters it → only row count compared
@@ -60,7 +68,7 @@ export interface ProofCoverage {
   /** tables present before+after and actually compared */
   tablesChecked: number;
   /** tables not compared, with why (recreated/dropped by the plan) */
-  tablesSkipped: Array<{ table: string; reason: string }>;
+  tablesSkipped: Array<{ table: TableRef; reason: string }>;
   perTable: TableCoverage[];
 }
 
@@ -200,7 +208,7 @@ async function tableStats(pool: Pool): Promise<Map<string, TableStat>> {
  *  string — PostgreSQL identifiers can contain dots, so `${schema}.${name}` is
  *  ambiguous (schema "a.b"/table "c" vs schema "a"/table "b.c") and a `.split`
  *  would mis-quote the seed target (review P2). */
-function relKey(schema: string, name: string): string {
+export function relKey(schema: string, name: string): string {
   return JSON.stringify([schema, name]);
 }
 function parseRelKey(key: string): [string, string] {
@@ -285,20 +293,25 @@ export function detectViolations(
   const tablesSkipped: ProofCoverage["tablesSkipped"] = [];
 
   for (const [table, beforeStat] of before) {
+    // `table` is the collision-free relKey the before/after maps are keyed by;
+    // the verdict carries the parsed { schema, name } so consumers never re-parse
+    // a JSON/dotted string (render with render.ts `rel()` for display).
+    const [schema, name] = parseRelKey(table);
+    const ref: TableRef = { schema, name };
     const afterStat = after.get(table);
     if (afterStat === undefined) {
-      tablesSkipped.push({ table, reason: "dropped by the plan" });
+      tablesSkipped.push({ table: ref, reason: "dropped by the plan" });
       continue;
     }
     if (ctx.recreatedTables.has(table)) {
-      tablesSkipped.push({ table, reason: "recreated by the plan" });
+      tablesSkipped.push({ table: ref, reason: "recreated by the plan" });
       continue;
     }
 
     const schemaStable = beforeStat.schemaSig === afterStat.schemaSig;
     if (afterStat.rows !== beforeStat.rows) {
       dataViolations.push({
-        table,
+        table: ref,
         before: beforeStat.rows,
         after: afterStat.rows,
       });
@@ -309,7 +322,7 @@ export function detectViolations(
       beforeStat.content !== afterStat.content
     ) {
       dataViolations.push({
-        table,
+        table: ref,
         before: beforeStat.rows,
         after: afterStat.rows,
         contentChanged: true,
@@ -320,7 +333,7 @@ export function detectViolations(
       afterStat.relfilenode !== beforeStat.relfilenode &&
       !ctx.declaredRewriteTables.has(table)
     ) {
-      rewriteViolations.push({ table });
+      rewriteViolations.push({ table: ref });
     }
 
     const contentMode: TableCoverage["contentMode"] =
@@ -330,7 +343,7 @@ export function detectViolations(
           ? "fingerprint"
           : "count";
     perTable.push({
-      table,
+      table: ref,
       contentMode,
       recreated: false,
       rewriteDeclared: ctx.declaredRewriteTables.has(table),
