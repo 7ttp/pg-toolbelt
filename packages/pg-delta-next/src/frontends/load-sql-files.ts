@@ -300,12 +300,33 @@ export async function loadSqlFiles(
   // bounded retry rounds at file granularity (fail-safe ordering)
   let pending = [...files].sort((a, b) => (a.name < b.name ? -1 : 1));
   let rounds = 0;
+  // the most recent round's per-file failures, retained so a budget-exhaustion
+  // error can report WHY each still-pending file failed (review P1 #2).
+  let lastFailures: Array<{ file: SqlFile; message: string }> = [];
   const client = await shadow.connect();
   try {
     await client.query(`SET check_function_bodies = off`);
     while (pending.length > 0) {
+      // Budget exhausted with files still pending: fail LOUD, never fall through
+      // to extraction with a partially loaded shadow (review P1 #2). The SQL-file
+      // frontend's contract is all-or-error — a caller must never receive a fact
+      // base that silently omits declarative files that did not converge.
+      if (rounds >= maxRounds) {
+        throw new ShadowLoadError(
+          `shadow load did not converge within maxRounds=${maxRounds}: ${pending.length} file(s) still pending (${pending.map((f) => f.name).join(", ")})`,
+          pending.map((f) => {
+            const failure = lastFailures.find((x) => x.file.name === f.name);
+            return {
+              code: "max_rounds_exceeded",
+              severity: "error",
+              message: failure
+                ? `${f.name}: ${failure.message}`
+                : `${f.name}: still pending after ${rounds} round(s)`,
+            };
+          }),
+        );
+      }
       rounds++;
-      if (rounds > maxRounds) break;
       const failures: Array<{ file: SqlFile; message: string }> = [];
       const next: SqlFile[] = [];
       for (const file of pending) {
@@ -333,6 +354,7 @@ export async function loadSqlFiles(
           })),
         );
       }
+      lastFailures = failures;
       pending = next;
     }
 

@@ -8,33 +8,41 @@
   | 3 | `FactBase.getByEncoded` + `incomingEdges` | ✅ shipped |
   | 7 | onboarding map + COVERAGE scope table | ✅ shipped |
   | 6 | non-txn apply state | ✅ substance shipped in the P1 fix (`inDoubt` + reset-in-`finally`) |
-  | 1 | `projectedDesired`-canonical | ⛔ deliberately NOT done — redundant with the shipped P0-1 invariant and would *regress* it (see below) |
-  | 4 | split extractor by family | 🟡 pure file-move — recommended as a dedicated commit |
-  | 5 | split `rules.ts` by family | 🟡 pure file-move — recommended as a dedicated commit |
+  | 1 | `projectedDesired` planning view | 🟢 emission seam shipped (follow-up review P1 #1); graph build stays on `desired` (see below) |
+  | 4 | split extractor by family | ✅ shipped (`f4e15ca`) |
+  | 5 | split `rules.ts` by family | ✅ shipped (`f4e15ca`) |
 - Deferred from the 2026-06-15 branch review
   ([../archive/pg-delta-next-branch-review-2026-06-15.md](../archive/pg-delta-next-branch-review-2026-06-15.md)),
   whose **correctness findings all shipped**. None of these changes behaviour.
 
-## 1. `projectedDesired` as the canonical planning view — ⛔ deliberately NOT done
+## 1. `projectedDesired` as the planning view — two views, deliberately distinct
 
-The review offered this as one of **two** ways to fix P0-1 (filtered planning
-referencing a missing dependency). We shipped the **other** one: the
-missing-requirement invariant in `buildActionGraph` (`src/plan/internal.ts`),
-which fails loud when a produced fact's `depends` edge resolves to something
-neither produced nor present in source.
+This item conflated two consumers that want DIFFERENT views. The follow-up
+review (P1 #1) showed why an earlier "do nothing, the invariant covers it"
+framing was too strong, and the resolution is now shipped:
 
-Doing *both* is not additive — it is actively harmful here. Routing the graph
-build through `projectedDesired` would reconstruct it as a `FactBase` from the
-projected facts, and the **filtered-out dependency edge becomes dangling and is
-dropped** by the `FactBase` constructor. The P0-1 invariant relies on that edge
-being present in `desired` to detect the missing requirement — so switching to
-`projectedDesired` would **silently regress the very bug the invariant fixes**,
-and the no-policy corpus (where `projectedDesired ≡ desired`) could not catch it.
+- **Emission uses the projected plan target.** `plan()` renders create / recreate
+  / in-place-alter actions against `projectedDesired` (`src/plan/plan.ts`), so a
+  child fact whose own add delta was policy-filtered (a column's DEFAULT, a
+  partitioned table's columns, a composite type's attributes, a publication's
+  relations) is never inlined via `alsoProduces` and never claimed as produced.
+  Rendering against full `desired` leaked filtered children into the SQL —
+  managed drift on a non-proof apply path.
+- **The graph build stays on un-projected `desired`.** The missing-requirement
+  invariant in `buildActionGraph` (`src/plan/internal.ts`) fails loud when a
+  produced fact's `depends` edge resolves to something neither produced nor
+  present in source. It relies on that edge being PRESENT in `desired`. Routing
+  the graph build through `projectedDesired` would reconstruct a `FactBase` whose
+  filtered-out dependency edge is dangling and **dropped by the constructor** —
+  silently regressing the very bug the invariant fixes, invisibly to the
+  no-policy corpus (where `projectedDesired ≡ desired`).
 
-So P0-1 is fully addressed by the invariant; this refactor is intentionally not
-taken. Revisit only if `buildActionGraph` is reworked to consult both views
-(projected for ordering, `desired` for the requirement check) — net complexity
-with no behaviour gain over today.
+So the invariant is **necessary but not sufficient** for delta-set inlining: it
+catches a kept fact that needs a filtered-away dependency, but it cannot stop
+emission from rendering a filtered child it can still see. Projected for
+emission, `desired` for the requirement check — the "two clearly named views"
+the review asked for, kept distinct in `plan()`. There is intentionally no single
+canonical view.
 
 ## 2. Precompute planner maps + a reverse dependency index
 
@@ -54,21 +62,26 @@ Add `incomingEdges(id)` if reverse walks become common (see #2). The goal is to
 stop consumers drifting from the canonical representation, **not** to widen the
 interface for convenience.
 
-## 4. Split the extractor by catalog family
+## 4. Split the extractor by catalog family — ✅ shipped (`f4e15ca`)
 
-`src/extract/extract.ts` is large enough that locality suffers. Keep the public
-`extract()` interface; split the internal query builders by object family
-(relations, constraints, functions, policies, publications, rls, security-labels,
-event-triggers), with shared scope + the dependency resolver in one place. A
-locality improvement, not a new abstraction layer. (The stale stage-history
-comments the review flagged are already corrected.)
+`src/extract/extract.ts` is now just the orchestrator; the per-family query
+builders live in their own files (`relations.ts`, `foreign.ts`, `types.ts`,
+`routines.ts`, `policies.ts`, `publications.ts`, `roles.ts`, `schemas.ts`,
+`event-triggers.ts`, `security-labels.ts`, …) with shared scope in `scope.ts`
+and the authoritative `pg_depend` resolver in `dependencies.ts`. The public
+`extract()` interface is unchanged — a locality improvement, not a new
+abstraction layer. (The stale stage-history comments the review flagged were
+corrected at the same time.)
 
-## 5. Split rule definitions by kind
+## 5. Split rule definitions by kind — ✅ shipped (`f4e15ca`)
 
-`src/plan/rules.ts` (~2.2k lines): keep the single exported registry as the
-planner interface; move rule definitions into per-family files and compose them
-in `rules.ts`, with shared helpers in one place. Improves review locality while
-preserving the data-driven leverage.
+`src/plan/rules.ts` is now the registry/interface only; the rule definitions
+live in per-family files under `src/plan/rules/` (`tables.ts`, `types.ts`,
+`constraints.ts`, `indexes.ts`, `views.ts`, `policies.ts`, `publications.ts`,
+`routines.ts`, `sequences.ts`, `triggers.ts`, `roles.ts`, `schemas.ts`,
+`foreign.ts`, `metadata.ts`) with shared rendering helpers in `helpers.ts`. The
+single exported registry stays the planner's interface, preserving the
+data-driven leverage while improving review locality.
 
 ## 6. Non-transactional apply as an explicit state machine
 

@@ -499,7 +499,14 @@ export function plan(
     (a, b) => depthOf(a) - depthOf(b),
   )) {
     if (producerOf.has(encodeId(fact.id))) continue;
-    emitCreate(fact, desired);
+    // EMISSION sees the PROJECTED plan target, not full `desired`: a child fact
+    // whose own add delta was policy-filtered (a column's DEFAULT, a partitioned
+    // table's column, a composite type's attribute, a publication's relation)
+    // is absent here, so create rules cannot inline it via `alsoProduces`
+    // (review P1 #1). buildActionGraph below still reads un-projected `desired`
+    // for the missing-requirement invariant — the two views are deliberately
+    // distinct (docs/roadmap/tier-3-engine-refactors.md §1).
+    emitCreate(fact, projectedDesired);
   }
 
   // default-privilege hygiene: objects created under active default ACLs
@@ -575,7 +582,9 @@ export function plan(
   const recreatedByReplace = new Set<string>();
   for (const key of replaceIds) {
     const oldFact = source.getByEncoded(key) as Fact;
-    const newFact = desired.getByEncoded(key) as Fact;
+    // the replacement is rendered from the PROJECTED plan target, so a filtered
+    // attribute change or child fact is not baked into the recreated SQL (P1 #1)
+    const newFact = projectedDesired.getByEncoded(key) as Fact;
     // old descendants die with the drop
     const oldDescendants: StableId[] = [oldFact.id];
     const walkOld = (id: StableId): void => {
@@ -590,16 +599,17 @@ export function plan(
       consumes: oldFact.parent !== undefined ? [oldFact.parent] : [],
       destroys: oldDescendants,
     });
-    emitCreate(newFact, desired);
-    // recreate surviving descendants from the DESIRED state (satellites,
-    // sub-facts). Descendants with their own attribute deltas are covered:
-    // the create renders the desired payload, so their alters are skipped.
+    emitCreate(newFact, projectedDesired);
+    // recreate surviving descendants from the PROJECTED plan target (satellites,
+    // sub-facts). Descendants with their own attribute deltas are covered: the
+    // create renders the projected payload, so their alters are skipped; a
+    // descendant whose add was policy-filtered is absent and so not recreated.
     const recreate = (id: StableId): void => {
-      for (const child of desired.childrenOf(id)) {
+      for (const child of projectedDesired.childrenOf(id)) {
         const childKey = encodeId(child.id);
         if (added.has(childKey)) continue; // already created via add delta
         recreatedByReplace.add(childKey);
-        emitCreate(child, desired);
+        emitCreate(child, projectedDesired);
         recreate(child.id);
       }
     };
@@ -609,12 +619,22 @@ export function plan(
   // in-place alters (skipped for facts a replace already recreated)
   for (const [key, sets] of setsByFact) {
     if (replaceIds.has(key) || recreatedByReplace.has(key)) continue;
-    const fact = desired.get(sets[0]!.id) as Fact;
+    // alters also render against the PROJECTED plan target: an alter that inlines
+    // a child reference (ALTER COLUMN … TYPE … re-applying the desired DEFAULT,
+    // REPLICA IDENTITY USING a desired index) must not surface a filtered-out
+    // child (review P1 #1). `source` stays as the from-state for the rule.
+    const fact = projectedDesired.get(sets[0]!.id) as Fact;
     const rules = rulesFor(fact.id.kind);
     for (const s of sets) {
       const attrRule = rules.attributes[s.attr];
       if (attrRule === undefined || attrRule === "replace") continue;
-      const specs = attrRule.alter(fact, s.from, s.to, desired, source);
+      const specs = attrRule.alter(
+        fact,
+        s.from,
+        s.to,
+        projectedDesired,
+        source,
+      );
       for (const spec of Array.isArray(specs) ? specs : [specs]) {
         pushAction("alter", spec, { consumes: [fact.id] });
       }

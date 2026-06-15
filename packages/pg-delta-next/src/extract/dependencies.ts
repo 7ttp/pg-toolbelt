@@ -73,12 +73,13 @@ export async function extractDependencyEdges(
       SELECT rc.oid, rc.relkind, json_build_object('kind',
                CASE rc.relkind
                  WHEN 'r' THEN 'table' WHEN 'p' THEN 'table'
+                 WHEN 'f' THEN 'foreignTable'
                  WHEN 'v' THEN 'view' WHEN 'm' THEN 'materializedView'
                  WHEN 'i' THEN 'index' WHEN 'I' THEN 'index'
                  WHEN 'S' THEN 'sequence' END,
                'schema', rn.nspname, 'name', rc.relname) AS id
       FROM pg_class rc JOIN pg_namespace rn ON rn.oid = rc.relnamespace
-      WHERE rc.relkind IN ('r','p','v','m','i','I','S')
+      WHERE rc.relkind IN ('r','p','f','v','m','i','I','S')
     ),
     cbi AS (
       -- a constraint-backed index resolves to its constraint, not the index
