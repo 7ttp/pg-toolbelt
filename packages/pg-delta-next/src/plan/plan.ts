@@ -296,12 +296,16 @@ export function plan(
     // `fullDestroy`, so its own subtree rebuilds completely.
     const fullDestroy = new Set([...removed.keys(), ...replaceIds]);
     const targets = new Set([...fullDestroy, ...rebuildSeeds.keys()]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const edge of source.edges) {
-        const toKey = encodeId(edge.to);
-        if (!targets.has(toKey)) continue;
+    // Reverse-dependency reachability from the initial targets, instead of
+    // rescanning every source edge each fixpoint round (O(reachable) vs
+    // O(edges × rounds), #2). Same checks/precedence as the fixpoint: a
+    // dependent of a destroyed/replaced fact (or a kind-restricted seed) that is
+    // rebuildable and survives in `desired` is replaced, and itself becomes a
+    // full-destroy target so its own subtree rebuilds.
+    const worklist = [...targets];
+    while (worklist.length > 0) {
+      const toKey = worklist.pop() as string;
+      for (const edge of source.incomingEdgesByEncoded(toKey)) {
         const fromKey = encodeId(edge.from);
         if (targets.has(fromKey)) continue;
         const dependent = source.get(edge.from);
@@ -315,14 +319,14 @@ export function plan(
         replaceIds.add(fromKey);
         fullDestroy.add(fromKey);
         targets.add(fromKey);
-        grew = true;
+        worklist.push(fromKey);
       }
     }
     // descendants of replaced facts are handled by the ancestor's subtree
     // recreate — keep only the topmost replaced facts
     // deleting the entry under iteration is safe for a JS Set
     for (const key of replaceIds) {
-      const fact = source.facts().find((f) => encodeId(f.id) === key);
+      const fact = source.getByEncoded(key);
       let ancestor = fact?.parent;
       while (ancestor !== undefined) {
         if (replaceIds.has(encodeId(ancestor))) {
@@ -570,8 +574,8 @@ export function plan(
   // replaces: drop old + create new (+ recreate unchanged descendants)
   const recreatedByReplace = new Set<string>();
   for (const key of replaceIds) {
-    const oldFact = source.facts().find((f) => encodeId(f.id) === key) as Fact;
-    const newFact = desired.facts().find((f) => encodeId(f.id) === key) as Fact;
+    const oldFact = source.getByEncoded(key) as Fact;
+    const newFact = desired.getByEncoded(key) as Fact;
     // old descendants die with the drop
     const oldDescendants: StableId[] = [oldFact.id];
     const walkOld = (id: StableId): void => {

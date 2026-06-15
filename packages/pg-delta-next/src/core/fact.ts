@@ -50,6 +50,7 @@ export class FactBase {
   readonly #byId = new Map<string, Entry>();
   readonly #children = new Map<string, Entry[]>();
   readonly #outgoing = new Map<string, DependencyEdge[]>();
+  readonly #incoming = new Map<string, DependencyEdge[]>();
   #edges: DependencyEdge[] = [];
   readonly #rollups = new Map<string, ContentHash>();
   readonly #structural = new Map<string, ContentHash>();
@@ -101,14 +102,23 @@ export class FactBase {
         continue;
       }
       this.#edges.push(edge);
-      const list = this.#outgoing.get(fromKey) ?? [];
-      list.push(edge);
-      this.#outgoing.set(fromKey, list);
+      const outList = this.#outgoing.get(fromKey) ?? [];
+      outList.push(edge);
+      this.#outgoing.set(fromKey, outList);
+      const inList = this.#incoming.get(toKey) ?? [];
+      inList.push(edge);
+      this.#incoming.set(toKey, inList);
     }
   }
 
   get edges(): readonly DependencyEdge[] {
     return this.#edges;
+  }
+
+  /** O(1) fact lookup by its already-encoded id (avoids decode + facts().find).
+   *  Consumers holding an encoded key use this instead of scanning facts(). */
+  getByEncoded(encoded: string): Fact | undefined {
+    return this.#byId.get(encoded)?.fact;
   }
 
   facts(): Fact[] {
@@ -135,6 +145,18 @@ export class FactBase {
 
   outgoingEdges(id: StableId): readonly DependencyEdge[] {
     return this.#outgoing.get(encodeId(id)) ?? [];
+  }
+
+  /** Edges pointing AT `id` (reverse index): the facts that depend on it. Used
+   *  by the planner's forced-rebuild reachability walk (O(reachable) instead of
+   *  rescanning every edge each round). */
+  incomingEdges(id: StableId): readonly DependencyEdge[] {
+    return this.#incoming.get(encodeId(id)) ?? [];
+  }
+
+  /** Reverse edges by already-encoded id (avoids re-encoding in hot walks). */
+  incomingEdgesByEncoded(encoded: string): readonly DependencyEdge[] {
+    return this.#incoming.get(encoded) ?? [];
   }
 
   /** Roots: facts with no parent, sorted by encoded id. */

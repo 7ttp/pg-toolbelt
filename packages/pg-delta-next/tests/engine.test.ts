@@ -6,6 +6,7 @@
  * test must fail; a pinned test that passes fails the suite.
  */
 import { writeSync } from "node:fs";
+import os from "node:os";
 import { describe, test } from "bun:test";
 import { apply } from "../src/apply/apply.ts";
 import { encodeId } from "../src/core/stable-id.ts";
@@ -184,26 +185,118 @@ function corpusProgress(label: string, ok: boolean): void {
   );
 }
 
-describe("engine: corpus proof loop", () => {
-  for (const scenario of CORPUS) {
-    test(`${scenario.name} (a -> b)`, async () => {
-      let ok = false;
-      try {
-        await runPinnedOrProve(scenario, "forward");
-        ok = true;
-      } finally {
-        corpusProgress(`${scenario.name} (a->b)`, ok);
-      }
-    }, 180_000);
+// Bounded-concurrency fast path (opt-in via PGDELTA_NEXT_CONCURRENCY=K). Default
+// (unset / 1) keeps the per-case serial tests below — unchanged for CI, clean
+// reporting, and EXPECTED_RED granularity. With K>1, a single driver runs the
+// SHARED-cluster cases through a pool of K (they use independent databases on
+// one cluster, so they're safe to run concurrently — `max_connections=300` is
+// provisioned for exactly this), while `isolatedCluster` cases run SERIALLY
+// (they mutate cluster-level role state and would corrupt each other's role
+// snapshots). K is capped to CPU cores so the host / PostgreSQL container is not
+// oversubscribed — the failure mode that inflates wall-time. The corpus is
+// I/O-bound on Postgres, so this trades the runner's serial dispatch for the
+// container's real concurrency ceiling.
+const CONCURRENCY = Math.min(
+  Math.max(
+    1,
+    Math.floor(Number(process.env["PGDELTA_NEXT_CONCURRENCY"] ?? "1")) || 1,
+  ),
+  os.availableParallelism?.() ?? os.cpus().length,
+);
 
-    test(`${scenario.name} (b -> a, teardown direction)`, async () => {
-      let ok = false;
-      try {
-        await runPinnedOrProve(scenario, "reverse");
-        ok = true;
-      } finally {
-        corpusProgress(`${scenario.name} (b->a)`, ok);
+interface Case {
+  scenario: Scenario;
+  direction: "forward" | "reverse";
+  label: string;
+}
+
+const ALL_CASES: Case[] = CORPUS.flatMap((scenario) => [
+  { scenario, direction: "forward", label: `${scenario.name} (a->b)` },
+  { scenario, direction: "reverse", label: `${scenario.name} (b->a)` },
+]);
+
+// Roles, role memberships, and other cluster-level objects are GLOBAL on the
+// shared cluster — they are NOT confined to a scenario's per-case databases.
+// Scenarios that touch them (CREATE/DROP/ALTER ROLE/USER/GROUP) reuse role
+// names across cases and rely on serial execution; running two concurrently
+// collides ("role already exists", "duplicate key pg_authid", "cannot be
+// dropped"). Such cases (plus the explicitly cluster-level isolatedCluster ones)
+// run SERIALLY; only genuinely DB-local scenarios go in the concurrent pool.
+const ROLE_DDL = /\b(?:create|drop|alter)\s+(?:role|user|group)\b/i;
+function mustRunSerially(scenario: Scenario): boolean {
+  return (
+    scenario.meta.isolatedCluster === true ||
+    ROLE_DDL.test(scenario.a) ||
+    ROLE_DDL.test(scenario.b) ||
+    (scenario.seed !== undefined && ROLE_DDL.test(scenario.seed))
+  );
+}
+
+if (CONCURRENCY > 1) {
+  describe("engine: corpus proof loop (concurrent)", () => {
+    test(`all ${CORPUS_TOTAL} cases (concurrency=${CONCURRENCY})`, async () => {
+      const failures: string[] = [];
+      const runOne = async (c: Case): Promise<void> => {
+        let ok = false;
+        try {
+          await runPinnedOrProve(c.scenario, c.direction);
+          ok = true;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          failures.push(c.label);
+          // full detail to stderr so a concurrent failure isn't lost in the
+          // single driver test's aggregated output
+          writeSync(2, `\nFAIL ${c.label}: ${msg}\n`);
+        } finally {
+          corpusProgress(c.label, ok);
+        }
+      };
+
+      // DB-local cases: bounded pool of K workers pulling from a shared
+      // cursor (single-threaded JS → `index++` needs no lock)
+      const concurrent = ALL_CASES.filter((c) => !mustRunSerially(c.scenario));
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, concurrent.length) }, () =>
+          (async () => {
+            for (let i = cursor++; i < concurrent.length; i = cursor++) {
+              await runOne(concurrent[i] as Case);
+            }
+          })(),
+        ),
+      );
+
+      // cluster-level cases (roles/memberships, isolatedCluster): serial
+      for (const c of ALL_CASES.filter((c) => mustRunSerially(c.scenario))) {
+        await runOne(c);
       }
-    }, 180_000);
-  }
-});
+
+      if (failures.length > 0) {
+        throw new Error(
+          `${failures.length}/${CORPUS_TOTAL} corpus cases failed (details above):\n` +
+            failures.map((l) => `  ${l}`).join("\n"),
+        );
+      }
+    }, 1_800_000);
+  });
+} else {
+  describe("engine: corpus proof loop", () => {
+    for (const c of ALL_CASES) {
+      test(
+        c.direction === "forward"
+          ? `${c.scenario.name} (a -> b)`
+          : `${c.scenario.name} (b -> a, teardown direction)`,
+        async () => {
+          let ok = false;
+          try {
+            await runPinnedOrProve(c.scenario, c.direction);
+            ok = true;
+          } finally {
+            corpusProgress(c.label, ok);
+          }
+        },
+        180_000,
+      );
+    }
+  });
+}
