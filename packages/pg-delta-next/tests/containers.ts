@@ -224,8 +224,13 @@ export const skipSeclabelProof =
   process.env["PGDELTA_SKIP_DUMMY_SECLABEL_BUILD"] === "true";
 
 const SECLABEL_PG_MAJOR = Number(/postgres:(\d+)/.exec(PG_IMAGE)?.[1] ?? "17");
+// Alpine base that ships the matching postgresql<major>-dev headers for the
+// dummy_seclabel build. 14 reuses 3.19 (postgresql14-dev 14.17) and 16 reuses
+// 3.23 (postgresql16-dev 16.14), so no new Alpine base images are introduced.
 const ALPINE_TAG_FOR_PG_MAJOR: Record<number, string> = {
+  14: "3.19",
   15: "3.19",
+  16: "3.23",
   17: "3.23",
   18: "3.23",
 };

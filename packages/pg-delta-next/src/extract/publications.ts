@@ -4,6 +4,32 @@ import { type ExtractContext, notExtensionMember } from "./scope.ts";
 
 export async function extractPublications(ctx: ExtractContext): Promise<void> {
   const { q, facts, pushWithMeta, pushOwnerEdge } = ctx;
+  // Publication column lists (pg_publication_rel.prattrs), row filters
+  // (pr.prqual), and schema membership (pg_publication_namespace) are all
+  // PostgreSQL 15+. On PG14 those catalog columns / relations do not exist, so
+  // the query degrades to bare table membership (no column list / WHERE, no
+  // schema publications) — exactly the publication feature set PG14 has.
+  const major = Math.floor(
+    Number(
+      (
+        await q(`SELECT current_setting('server_version_num')::int AS num`)
+      )[0]?.["num"] ?? 0,
+    ) / 10000,
+  );
+  const columnsExpr =
+    major >= 15
+      ? `(SELECT array_agg(att.attname::text ORDER BY att.attname)
+                          FROM unnest(pr.prattrs) WITH ORDINALITY AS pa(attnum, ord)
+                          JOIN pg_attribute att ON att.attrelid = pc.oid AND att.attnum = pa.attnum)`
+      : `NULL`;
+  const whereExpr = major >= 15 ? `pg_get_expr(pr.prqual, pr.prrelid)` : `NULL`;
+  const schemasExpr =
+    major >= 15
+      ? `(SELECT array_agg(pn2.nspname::text ORDER BY 1)
+            FROM pg_publication_namespace pns
+            JOIN pg_namespace pn2 ON pn2.oid = pns.pnnspid
+            WHERE pns.pnpubid = p.oid)`
+      : `NULL::text[]`;
   // ── publications ─────────────────────────────────────────────────────
   for (const row of await q(`
     SELECT p.pubname AS name, r.rolname AS owner,
@@ -11,19 +37,14 @@ export async function extractPublications(ctx: ExtractContext): Promise<void> {
            p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate,
            (SELECT json_agg(json_build_object(
               'schema', pn.nspname, 'name', pc.relname,
-              'columns', (SELECT array_agg(att.attname::text ORDER BY att.attname)
-                          FROM unnest(pr.prattrs) WITH ORDINALITY AS pa(attnum, ord)
-                          JOIN pg_attribute att ON att.attrelid = pc.oid AND att.attnum = pa.attnum),
-              'where', pg_get_expr(pr.prqual, pr.prrelid)
+              'columns', ${columnsExpr},
+              'where', ${whereExpr}
             ) ORDER BY pn.nspname, pc.relname)
             FROM pg_publication_rel pr
             JOIN pg_class pc ON pc.oid = pr.prrelid
             JOIN pg_namespace pn ON pn.oid = pc.relnamespace
             WHERE pr.prpubid = p.oid) AS tables,
-           (SELECT array_agg(pn2.nspname::text ORDER BY 1)
-            FROM pg_publication_namespace pns
-            JOIN pg_namespace pn2 ON pn2.oid = pns.pnnspid
-            WHERE pns.pnpubid = p.oid) AS schemas,
+           ${schemasExpr} AS schemas,
            obj_description(p.oid, 'pg_publication') AS comment
     FROM pg_publication p
     JOIN pg_roles r ON r.oid = p.pubowner

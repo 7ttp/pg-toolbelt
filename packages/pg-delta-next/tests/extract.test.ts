@@ -38,15 +38,23 @@ const FIXTURE_DDL = /* sql */ `
   CREATE ROLE app_reader_xyz NOLOGIN;
   GRANT SELECT ON app.users TO app_reader_xyz;
   CREATE TYPE app.addr AS (street text, city varchar(90));
-  CREATE PUBLICATION app_pub FOR TABLE app.users (id, email);
 `;
 
 let db: TestDb;
 let result: ExtractResult;
+let pgMajor: number;
 
 beforeAll(async () => {
   db = await createTestDb("extract");
   await db.pool.query(FIXTURE_DDL);
+  pgMajor = await db.cluster.pgMajor();
+  // publication column lists are PG15+; on PG14 publish the whole table so the
+  // rest of the fixture still exercises publication facts.
+  await db.pool.query(
+    pgMajor >= 15
+      ? `CREATE PUBLICATION app_pub FOR TABLE app.users (id, email)`
+      : `CREATE PUBLICATION app_pub FOR TABLE app.users`,
+  );
   result = await extract(db.pool);
 }, 120_000);
 
@@ -222,7 +230,10 @@ describe("extract: fixture ring", () => {
       table: "users",
     });
     expect(rel?.parent).toEqual({ kind: "publication", name: "app_pub" });
-    expect(rel?.payload["columns"]).toEqual(["email", "id"]);
+    // column lists are PG15+; on PG14 the publication has no column list
+    expect(rel?.payload["columns"]).toEqual(
+      pgMajor >= 15 ? ["email", "id"] : null,
+    );
   });
 
   test("comments and ACLs are satellite facts parented to their target", () => {

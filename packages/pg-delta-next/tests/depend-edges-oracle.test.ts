@@ -62,16 +62,22 @@ const FIXTURE_DDL = /* sql */ `
   CREATE FUNCTION app.evt() RETURNS event_trigger
     LANGUAGE plpgsql AS 'BEGIN END';
   CREATE EVENT TRIGGER app_evt ON ddl_command_end EXECUTE FUNCTION app.evt();
-
-  CREATE PUBLICATION app_pub FOR TABLE app.users (id, email);
 `;
 
 let db: TestDb;
 let result: ExtractResult;
+let pgMajor: number;
 
 beforeAll(async () => {
   db = await createTestDb("depend-oracle");
   await db.pool.query(FIXTURE_DDL);
+  pgMajor = await db.cluster.pgMajor();
+  // publication column lists are PG15+; on PG14 publish the whole table.
+  await db.pool.query(
+    pgMajor >= 15
+      ? `CREATE PUBLICATION app_pub FOR TABLE app.users (id, email)`
+      : `CREATE PUBLICATION app_pub FOR TABLE app.users`,
+  );
   result = await extract(db.pool);
 }, 120_000);
 
@@ -89,7 +95,15 @@ function renderEdges(kind: string): string[] {
 
 describe("pg_depend resolver: edge-set oracle", () => {
   test("depends edges are exactly as resolved today", () => {
-    expect(renderEdges("depends")).toMatchInlineSnapshot(`
+    // Some pg_depend rows differ across the supported version matrix and are
+    // excluded so this oracle is stable from PG14-18: object self-dependencies
+    // (PG14 records view/matview _RETURN self-deps; PG15+ does not) and
+    // publication column-list edges (PG15+ only — pinned separately below).
+    const dependsEdges = renderEdges("depends").filter((e) => {
+      const [from, to] = e.split(" -> ");
+      return from !== to && !e.startsWith("publication:app_pub -> column:");
+    });
+    expect(dependsEdges).toMatchInlineSnapshot(`
       [
         "column:app.users.home -> type:app.addr",
         "column:app.users.qty -> domain:app.pos",
@@ -115,9 +129,6 @@ describe("pg_depend resolver: edge-set oracle", () => {
         "procedure:app.inc(integer) -> schema:app",
         "procedure:app.touch() -> schema:app",
         "procedure:app.user_count() -> schema:app",
-        "publication:app_pub -> column:app.users.email",
-        "publication:app_pub -> column:app.users.id",
-        "publication:app_pub -> publication:app_pub",
         "publication:app_pub -> table:app.users",
         "sequence:app.id_seq -> schema:app",
         "table:app.archived_orders -> schema:app",
@@ -137,8 +148,26 @@ describe("pg_depend resolver: edge-set oracle", () => {
     `);
   });
 
+  test("publication column-list edges are PG15+", () => {
+    if (pgMajor < 15) return; // publication column lists don't exist before PG15
+    expect(
+      renderEdges("depends").filter((e) =>
+        e.startsWith("publication:app_pub -> column:"),
+      ),
+    ).toEqual([
+      "publication:app_pub -> column:app.users.email",
+      "publication:app_pub -> column:app.users.id",
+    ]);
+  });
+
   test("owner edges are exactly as resolved today", () => {
-    expect(renderEdges("owner")).toMatchInlineSnapshot(`
+    // the `public` schema is owned by the bootstrap role on PG14 but by
+    // pg_database_owner (a pg_* role, filtered out) on PG15+; exclude it so
+    // this oracle is stable across the version matrix.
+    const ownerEdges = renderEdges("owner").filter(
+      (e) => !e.startsWith("schema:public -> "),
+    );
+    expect(ownerEdges).toMatchInlineSnapshot(`
       [
         "domain:app.pos -> role:test",
         "eventTrigger:app_evt -> role:test",
