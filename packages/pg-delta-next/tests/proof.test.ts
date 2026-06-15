@@ -40,7 +40,11 @@ describe("proof: rewrite observation", () => {
       for (const a of buggy.actions) a.rewriteRisk = false;
       const verdict = await provePlan(buggy, source.pool, d.factBase);
       expect(verdict.rewriteViolations.length).toBeGreaterThan(0);
-      expect(verdict.rewriteViolations[0]?.table).toBe("app.t");
+      // `.table` is the collision-free relKey (a JSON [schema, name] tuple,
+      // review P2), not a dotted string — identifiers can contain dots.
+      expect(verdict.rewriteViolations[0]?.table).toBe(
+        JSON.stringify(["app", "t"]),
+      );
       expect(verdict.ok).toBe(false);
     } finally {
       await Promise.all([source.drop(), desired.drop()]);
@@ -138,7 +142,10 @@ describe("proof: auto-seed data preservation", () => {
           autoSeed: true,
         });
         expect(seeded.dataViolations.length).toBeGreaterThan(0);
-        expect(seeded.dataViolations[0]?.table).toBe("app.t");
+        // `.table` is the collision-free relKey (JSON [schema, name] tuple).
+        expect(seeded.dataViolations[0]?.table).toBe(
+          JSON.stringify(["app", "t"]),
+        );
       } finally {
         await source2.drop();
       }
