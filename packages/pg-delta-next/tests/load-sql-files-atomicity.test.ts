@@ -84,6 +84,59 @@ describe("loadSqlFiles — per-file transactional apply", () => {
     }
   }, 60_000);
 
+  test("round-budget exhaustion throws instead of returning partial state (review P1 #2)", async () => {
+    const shadow = await createTestDb("shadow_max_rounds");
+    try {
+      // A two-round dependency chain: 00_table needs the schema 01_schema
+      // creates, so round 1 loads only the schema and round 2 is required for
+      // the table. With maxRounds: 1 the loader runs out of budget WITH the
+      // table still pending — it must fail loud, never return a fact base that
+      // silently omits the table (the partial-state bug).
+      let error: unknown;
+      try {
+        await loadSqlFiles(
+          [
+            { name: "00_table.sql", sql: `CREATE TABLE app.t (id integer);` },
+            { name: "01_schema.sql", sql: `CREATE SCHEMA app;` },
+          ],
+          shadow.pool,
+          { maxRounds: 1 },
+        );
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(ShadowLoadError);
+      // the error names the still-pending file and carries its last failure
+      expect((error as ShadowLoadError).message).toContain("00_table.sql");
+    } finally {
+      await shadow.drop();
+    }
+  }, 60_000);
+
+  test("maxRounds: 0 with any file throws before loading anything (review P1 #2)", async () => {
+    const shadow = await createTestDb("shadow_zero_rounds");
+    try {
+      let error: unknown;
+      try {
+        await loadSqlFiles(
+          [{ name: "0_schema.sql", sql: `CREATE SCHEMA app;` }],
+          shadow.pool,
+          { maxRounds: 0 },
+        );
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(ShadowLoadError);
+      // nothing was applied — the shadow is still empty
+      const { rows } = await shadow.pool.query(
+        `SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = 'app'`,
+      );
+      expect((rows[0] as { n: number }).n).toBe(0);
+    } finally {
+      await shadow.drop();
+    }
+  }, 60_000);
+
   test("a CREATE INDEX CONCURRENTLY file loads via the raw fallback", async () => {
     const shadow = await createTestDb("shadow_concurrently");
     try {

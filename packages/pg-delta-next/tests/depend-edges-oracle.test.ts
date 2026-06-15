@@ -189,3 +189,46 @@ describe("pg_depend resolver: edge-set oracle", () => {
     `);
   });
 });
+
+/**
+ * Foreign tables (`pg_class.relkind = 'f'`) must resolve at the RELATION level,
+ * not only at the column level. The set-based resolver's `rel` CTE skipped 'f',
+ * so a view depending on the foreign-table relation shape (e.g. `count(*)`) lost
+ * its dependency edge entirely (review P1 #3). Pinned in its own container so the
+ * cross-version oracle snapshot above stays untouched.
+ */
+describe("pg_depend resolver: foreign-table relation-level dependencies (review P1 #3)", () => {
+  let ftDb: TestDb;
+  let ftResult: ExtractResult;
+
+  beforeAll(async () => {
+    ftDb = await createTestDb("depend-oracle-ft");
+    // A handler-less FDW is enough: CREATE VIEW only parses/rewrites its query
+    // (it never invokes the FDW), so the relation-level pg_depend edge is still
+    // recorded — mirroring corpus/foreign-table-constraints--add-check.
+    await ftDb.pool.query(`
+      CREATE SCHEMA ftapp;
+      CREATE FOREIGN DATA WRAPPER ftapp_fdw;
+      CREATE SERVER ftapp_srv FOREIGN DATA WRAPPER ftapp_fdw;
+      CREATE FOREIGN TABLE ftapp.ft (id integer) SERVER ftapp_srv;
+      CREATE VIEW ftapp.v_count AS SELECT count(*) AS n FROM ftapp.ft;
+      CREATE VIEW ftapp.v_cols AS SELECT id FROM ftapp.ft;
+    `);
+    ftResult = await extract(ftDb.pool);
+  }, 120_000);
+
+  afterAll(async () => {
+    await ftDb.drop();
+  });
+
+  test("a view referencing only the relation shape keeps its foreignTable dependency", () => {
+    const depends = ftResult.factBase.edges
+      .filter((e) => e.kind === "depends")
+      .map((e) => `${encodeId(e.from)} -> ${encodeId(e.to)}`);
+    // count(*) references the relation, not any column: the edge must resolve to
+    // the foreignTable id rather than being dropped as a NULL endpoint.
+    expect(depends).toContain("view:ftapp.v_count -> foreignTable:ftapp.ft");
+    // a column reference still resolves to the column (unchanged behaviour).
+    expect(depends).toContain("view:ftapp.v_cols -> column:ftapp.ft.id");
+  });
+});
