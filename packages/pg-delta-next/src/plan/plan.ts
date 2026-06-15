@@ -630,6 +630,31 @@ export function plan(
       if (delta.verb !== "unlink" || delta.edge.kind !== "owner") continue;
       oldOwnerByFact.set(encodeId(delta.edge.from), delta.edge.to);
     }
+    // Accepted renames carry ownership: `ALTER … RENAME` never changes the
+    // owner, so the renamed subtree's owner edge resurfaces as a fresh link in
+    // the desired base even when nothing changed. Map each renamed-to id to the
+    // owner its rename-from counterpart held in source; an unchanged owner emits
+    // no action (the rename carries it), a genuinely changed owner still does.
+    // Subtree ids zip by index — the rename matched on a structural rollup.
+    const renamedOwner = new Map<string, string | null>();
+    for (const { from, to } of acceptedRenames) {
+      const srcIds = subtreeIds(source, from.id);
+      const dstIds = subtreeIds(desired, to.id);
+      for (let i = 0; i < dstIds.length; i++) {
+        const srcId = srcIds[i];
+        const dstId = dstIds[i];
+        if (srcId === undefined || dstId === undefined) continue;
+        const ownerEdge = source
+          .outgoingEdges(srcId)
+          .find((e) => e.kind === "owner");
+        renamedOwner.set(
+          encodeId(dstId),
+          ownerEdge?.to.kind === "role"
+            ? (ownerEdge.to as { kind: "role"; name: string }).name
+            : null,
+        );
+      }
+    }
     for (const delta of deltas) {
       if (delta.verb !== "link" || delta.edge.kind !== "owner") continue;
       const objId = delta.edge.from;
@@ -648,6 +673,8 @@ export function plan(
       const newRoleId = delta.edge.to;
       if (newRoleId.kind !== "role") continue;
       const roleName = (newRoleId as { kind: "role"; name: string }).name;
+      // ownership carried unchanged by an accepted rename — no action needed
+      if (renamedOwner.get(objKey) === roleName) continue;
       // Owner residue (move 6): `ALTER … OWNER TO R` requires the applier to be
       // a superuser or a member of R. If a capability is supplied and the
       // applier cannot, fail fast at plan time with an actionable message —
