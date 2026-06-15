@@ -189,6 +189,147 @@ describe("owner edge: out-of-view owner role prunes ownership (skipAuth eliminat
 });
 
 // ---------------------------------------------------------------------------
+// Test (d): accepted table rename + owner CHANGE — the renamed table is owned
+// by a NEW role; the old role is dropped. The owner reassignment must sort
+// BEFORE the old role drop, or `DROP OWNED BY old; DROP ROLE old` drops the
+// still-old-owned renamed table (second follow-up review, P1 #1).
+//
+// We prove against the SOURCE database directly (it is sacrificial), NOT a
+// clone: roles are cluster-global, so a clone leaves the original source db
+// owning the table via the old role — `DROP ROLE` then fails on a cross-
+// database dependency that has nothing to do with the plan. Applying on the
+// source itself is the same pattern renames.test.ts uses.
+// ---------------------------------------------------------------------------
+
+describe("owner edge: accepted rename + owner change drops old role last (P1 #1)", () => {
+  test("ALTER … OWNER TO new sorts before DROP ROLE old; proof is clean", async () => {
+    const [clusterA, clusterB] = await isolatedClusterPair();
+    const srcDb = await clusterA.createDb("ren_ownchg_src");
+    const dstDb = await clusterB.createDb("ren_ownchg_dst");
+    dbs.push(srcDb, dstDb);
+
+    // source: role renown1_old (NOLOGIN) owns app.old_t
+    await clusterA.adminPool
+      .query(`CREATE ROLE renown1_old NOLOGIN`)
+      .catch(() => {});
+    await srcDb.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.old_t (id int, name text);
+        ALTER TABLE app.old_t OWNER TO renown1_old;
+      `);
+
+    // desired: app.new_t (a structural rename of old_t) owned by a DIFFERENT
+    // role renown1_new. LOGIN ≠ NOLOGIN keeps the roles from matching as a
+    // rename, so this is a genuine owner CHANGE + old-role drop.
+    await clusterB.adminPool
+      .query(`CREATE ROLE renown1_new LOGIN`)
+      .catch(() => {});
+    await dstDb.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.new_t (id int, name text);
+        ALTER TABLE app.new_t OWNER TO renown1_new;
+      `);
+
+    const [srcState, dstState] = await Promise.all([
+      extract(srcDb.pool),
+      extract(dstDb.pool),
+    ]);
+    const thePlan = plan(srcState.factBase, dstState.factBase, {
+      renames: "auto",
+    });
+
+    // it is a RENAME (not drop+create) and emits ALTER … OWNER TO renown1_new
+    expect(thePlan.actions.some((a) => a.sql.includes("RENAME TO"))).toBe(true);
+    const ownerIdx = thePlan.actions.findIndex(
+      (a) => a.sql.includes("OWNER TO") && a.sql.includes("renown1_new"),
+    );
+    expect(ownerIdx).toBeGreaterThanOrEqual(0);
+    const dropOldIdx = thePlan.actions.findIndex(
+      (a) => a.verb === "drop" && a.sql.includes("renown1_old"),
+    );
+    expect(dropOldIdx).toBeGreaterThanOrEqual(0);
+    // the reassignment must precede the old role drop
+    expect(ownerIdx).toBeLessThan(dropOldIdx);
+
+    const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
+    expect(verdict.applyError).toBeUndefined();
+    expect(verdict.driftDeltas).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// Test (e): accepted table rename + accepted owner-ROLE rename. PostgreSQL
+// carries the owner OID across both renames, so NO `ALTER … OWNER TO` is
+// needed and the two renames must not deadlock each other (P1 #2 cycle).
+//
+// Roles are cluster-global, so to keep the role rename UNAMBIGUOUS regardless
+// of leftover roles from other tests, the pair carries a distinctive role
+// config (statement_timeout) that no other test uses → its structural rollup
+// is unique → exactly one removed × one added. Proven against the source db
+// directly (sacrificial), as in test (d).
+// ---------------------------------------------------------------------------
+
+describe("owner edge: table rename + owner-role rename carries ownership (P1 #2)", () => {
+  test("both renames emitted, no spurious OWNER TO, no cycle; proof clean", async () => {
+    const [clusterA, clusterB] = await isolatedClusterPair();
+    const srcDb = await clusterA.createDb("ren_ownren_src");
+    const dstDb = await clusterB.createDb("ren_ownren_dst");
+    dbs.push(srcDb, dstDb);
+
+    // renown2_a (source) and renown2_b (desired) share a distinctive config so
+    // their structural rollup matches each other and nothing else → the role
+    // rename is unambiguous despite other tests' cluster-global roles.
+    await clusterA.adminPool
+      .query(`CREATE ROLE renown2_a NOLOGIN`)
+      .catch(() => {});
+    await clusterA.adminPool
+      .query(`ALTER ROLE renown2_a SET statement_timeout = '31337ms'`)
+      .catch(() => {});
+    await srcDb.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.old_t (id int, name text);
+        ALTER TABLE app.old_t OWNER TO renown2_a;
+      `);
+
+    await clusterB.adminPool
+      .query(`CREATE ROLE renown2_b NOLOGIN`)
+      .catch(() => {});
+    await clusterB.adminPool
+      .query(`ALTER ROLE renown2_b SET statement_timeout = '31337ms'`)
+      .catch(() => {});
+    await dstDb.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.new_t (id int, name text);
+        ALTER TABLE app.new_t OWNER TO renown2_b;
+      `);
+
+    const [srcState, dstState] = await Promise.all([
+      extract(srcDb.pool),
+      extract(dstDb.pool),
+    ]);
+    // must not throw a dependency cycle
+    const thePlan = plan(srcState.factBase, dstState.factBase, {
+      renames: "auto",
+    });
+
+    // both the table and the role are renamed
+    expect(
+      thePlan.actions.filter((a) => a.sql.includes("RENAME TO")),
+    ).toHaveLength(2);
+    // ownership is carried by the renames — no ALTER … OWNER TO is emitted
+    expect(
+      thePlan.actions.filter((a) => a.sql.includes("OWNER TO")),
+    ).toHaveLength(0);
+
+    const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
+    expect(verdict.applyError).toBeUndefined();
+    expect(verdict.driftDeltas).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
 // Test (d): owner residue (follow-up 1). A non-superuser applier that is not a
 // member of an object's owner role cannot run ALTER … OWNER TO. The owner can't
 // be silently skipped (acldefault is owner-relative → no convergence), so the
