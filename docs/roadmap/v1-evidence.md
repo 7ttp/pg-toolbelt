@@ -3,7 +3,7 @@
 - **Purpose**: the recorded, reproducible proof that the v1 correctness gates
   passed *at scale* — not just at CI defaults. v1 is not cut until this document
   is filled and the gates are green. Parent roadmap:
-  [`pg-delta-next-remaining-work.md`](v1.md) (§2,
+  [`v1.md`](v1.md) (§2,
   "Validation — run the gates to green at scale").
 - **Status**: ⏳ **TEMPLATE — not yet run.** The engineering correctness items
   are shipped (roadmap §1); this is the remaining validation-at-scale gate.

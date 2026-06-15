@@ -20,7 +20,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import { extract } from "../../extract/extract.ts";
 import { exportSqlFiles } from "../../frontends/export-sql-files.ts";
 import { loadSqlFiles } from "../../frontends/load-sql-files.ts";
@@ -100,8 +100,16 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
     });
     const files = exportSqlFiles(factBase, { layout });
 
+    const outRoot = resolve(outDir);
     for (const file of files) {
-      const full = join(outDir, file.name);
+      const full = resolve(outDir, file.name);
+      // defense-in-depth (review P2): even with per-segment encoding in
+      // exportSqlFiles, never let a database identifier escape the output dir.
+      if (full !== outRoot && !full.startsWith(outRoot + sep)) {
+        throw new Error(
+          `export: refusing to write outside ${outDir}: ${file.name}`,
+        );
+      }
       mkdirSync(dirname(full), { recursive: true });
       writeFileSync(full, file.sql, "utf8");
     }

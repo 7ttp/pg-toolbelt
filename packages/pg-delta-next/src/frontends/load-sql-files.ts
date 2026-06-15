@@ -63,6 +63,26 @@ async function applyFile(client: PoolClient, sql: string): Promise<void> {
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     if (isNonTransactional(error)) {
+      // a statement that cannot run in a transaction block (CREATE INDEX
+      // CONCURRENTLY, …) must be the file's ONLY statement: a raw whole-file
+      // retry of a multi-statement file applies the rest non-atomically and can
+      // leave the shadow partially loaded on a later failure (review P2). Reuse
+      // the literal/comment/dollar-quote mask so `;` inside bodies isn't counted.
+      const statementCount = maskLiteralsAndComments(sql)
+        .split(";")
+        .filter((s) => s.trim() !== "").length;
+      if (statementCount > 1) {
+        throw new ShadowLoadError(
+          `a non-transactional statement (e.g. CREATE INDEX CONCURRENTLY) must be the only statement in its file, but this file has ${statementCount} statements — move the non-transactional statement into its own file`,
+          [
+            {
+              code: "mixed_nontransactional_file",
+              severity: "error",
+              message: `file mixes a non-transactional statement with ${statementCount - 1} other statement(s)`,
+            },
+          ],
+        );
+      }
       await client.query(sql);
       return;
     }
@@ -326,17 +346,29 @@ export async function loadSqlFiles(
           (r) => (r as { rolname: string }).rolname,
         ),
       );
-      const leaked = rolesAfter.rows
-        .map((r) => (r as { rolname: string }).rolname)
-        .filter((r) => !beforeRoleSet.has(r));
-      if (leaked.length > 0) {
+      const afterRoleSet = new Set(
+        rolesAfter.rows.map((r) => (r as { rolname: string }).rolname),
+      );
+      // symmetric: a CREATE ROLE (after∖before) AND a DROP ROLE (before∖after)
+      // are both cluster-level side effects in shared-scratch mode (review P1).
+      const createdRoles = [...afterRoleSet].filter(
+        (r) => !beforeRoleSet.has(r),
+      );
+      const droppedRoles = [...beforeRoleSet].filter(
+        (r) => !afterRoleSet.has(r),
+      );
+      if (createdRoles.length > 0 || droppedRoles.length > 0) {
+        const parts = [
+          createdRoles.length > 0 ? `created: ${createdRoles.join(", ")}` : "",
+          droppedRoles.length > 0 ? `dropped: ${droppedRoles.join(", ")}` : "",
+        ].filter(Boolean);
         throw new ShadowLoadError(
-          `declarative files created cluster-level objects (roles: ${leaked.join(", ")}) — use an isolated-cluster shadow for shared objects`,
-          leaked.map((r) => ({
+          `declarative files changed cluster-level roles (${parts.join("; ")}) — use an isolated-cluster shadow for shared objects`,
+          [...createdRoles, ...droppedRoles].map((r) => ({
             code: "shared_object_leak",
             severity: "error",
             subject: { kind: "role", name: r },
-            message: `role ${r} leaked out of the shadow database`,
+            message: `role ${r} changed out of the shadow database`,
           })),
         );
       }
@@ -349,23 +381,37 @@ export async function loadSqlFiles(
         JOIN pg_roles r1 ON r1.oid = m.roleid
         JOIN pg_roles r2 ON r2.oid = m.member
         ORDER BY 1, 2`);
+      // symmetric over the serialized rows (which include admin_option): a GRANT
+      // (after∖before), a REVOKE (before∖after), and an admin_option change (which
+      // appears as one of each) are all cluster-level side effects (review P1).
       const beforeMemberSet = new Set(
         (membershipsBefore?.rows ?? []).map(serializeMembership),
       );
-      const leakedMemberships = membershipsAfter.rows.filter(
+      const afterMemberSet = new Set(
+        membershipsAfter.rows.map(serializeMembership),
+      );
+      const grants = membershipsAfter.rows.filter(
         (m) => !beforeMemberSet.has(serializeMembership(m)),
       );
-      if (leakedMemberships.length > 0) {
-        const descriptions = leakedMemberships.map(
-          (m) =>
-            `GRANT ${m.role} TO ${m.member}${m.admin_option ? " WITH ADMIN OPTION" : ""}`,
-        );
+      const revokes = (membershipsBefore?.rows ?? []).filter(
+        (m) => !afterMemberSet.has(serializeMembership(m)),
+      );
+      if (grants.length > 0 || revokes.length > 0) {
+        const describe = (
+          m: MembershipTuple,
+          verb: "GRANT" | "REVOKE",
+        ): string =>
+          `${verb} ${m.role} ${verb === "GRANT" ? "TO" : "FROM"} ${m.member}${m.admin_option ? " WITH ADMIN OPTION" : ""}`;
+        const descriptions = [
+          ...grants.map((m) => describe(m, "GRANT")),
+          ...revokes.map((m) => describe(m, "REVOKE")),
+        ];
         throw new ShadowLoadError(
           `declarative files modified cluster-level membership (${descriptions.join(", ")}) — use an isolated-cluster shadow for shared objects`,
-          leakedMemberships.map((m) => ({
+          descriptions.map((d) => ({
             code: "shared_object_leak",
             severity: "error",
-            message: `membership leak: GRANT ${m.role} TO ${m.member}${m.admin_option ? " WITH ADMIN OPTION" : ""}`,
+            message: `membership leak: ${d}`,
           })),
         );
       }
@@ -424,6 +470,10 @@ export async function loadSqlFiles(
       );
     }
   } finally {
+    // restore the GUC even when load fails early (before the on-success reset
+    // at the body-validation step) — otherwise the pooled client returns with
+    // check_function_bodies still off (review P2).
+    await client.query(`RESET check_function_bodies`).catch(() => {});
     client.release();
   }
 

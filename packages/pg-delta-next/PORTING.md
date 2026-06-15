@@ -17,7 +17,7 @@ agent sections below (PORTING-agent1..6).
 | supabase-dsl-e2e.test.ts | Requires Supabase image + filter/serialize DSL (stage 8) |
 | dbdev-roundtrip.test.ts | Requires Supabase image + dbdev migrations + integration DSL (stage 8) |
 | remote-supabase.test.ts | Manual test requiring a remote DATABASE_URL; skipped in the old suite too |
-| security-label-operations.test.ts | Requires the custom dummy_seclabel image; security labels not yet extracted (extend extractor + set PGDELTA_TEST_IMAGE to a dummy_seclabel build) |
+| security-label-operations.test.ts | Security labels: implemented & proven — see COVERAGE.md. Requires the custom dummy_seclabel image (set PGDELTA_TEST_IMAGE to a dummy_seclabel build); filter DSL (stage 8) not yet wired. |
 | security-label-filter.test.ts | Same dummy_seclabel requirement, plus filter DSL (stage 8) |
 | apply-plan.test.ts | Asserts old plan/fingerprint API mechanics; the new plan artifact has its own contract (fingerprints are rollup hashes; covered by unit + proof tests) |
 | catalog-export-filter.test.ts | Asserts old catalog-snapshot filtering — policy layer (stage 8) |

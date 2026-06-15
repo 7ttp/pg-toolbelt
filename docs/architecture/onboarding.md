@@ -1,0 +1,55 @@
+# pg-delta-next: contributor onboarding map
+
+A one-page orientation for someone touching the engine for the first time.
+Pairs with [overview.md](../overview.md) (the why) and
+[target-architecture.md](target-architecture.md) (the full design).
+
+## The pipeline, and where each stage lives
+
+```mermaid
+flowchart TD
+  Extract["extract(pool)\nsrc/extract/extract.ts"] --> FB["FactBase\nsrc/core/fact.ts\n(facts + dependency edges)"]
+  SqlFiles["SQL-file frontend\nsrc/frontends/load-sql-files.ts"] --> FB
+  FB --> View["resolveView\nsrc/policy/policy.ts\n(policy · capability · baseline)"]
+  View --> Diff["diff\nsrc/core/diff.ts\n(generic, zero per-kind code)"]
+  Diff --> Plan["plan\nsrc/plan/plan.ts + rules.ts\n(rule table → one action graph)"]
+  Plan --> Apply["apply\nsrc/apply/apply.ts"]
+  Plan --> Prove["provePlan\nsrc/proof/prove.ts\n(apply to a clone, re-extract, compare)"]
+  Corpus["corpus/ scenarios\n(a.sql / b.sql)"] --> Prove
+```
+
+Answers to the five questions a newcomer asks:
+
+| Question | Where |
+|---|---|
+| Where do facts come from? | `src/extract/extract.ts` (live DB) and `src/frontends/load-sql-files.ts` (`.sql` → shadow DB → extract). Both produce a `FactBase`. |
+| What is a fact? | `src/core/fact.ts` — a content-addressed `{ id: StableId, parent?, payload }`. Identity lives in `src/core/stable-id.ts`; hashing in `src/core/hash.ts`. |
+| How is ordering decided? | `src/plan/plan.ts` builds atomic actions from the rule table (`src/plan/rules.ts`) and orders them with one topological sort over the dependency graph (`src/plan/internal.ts`). At fact grain there are no cycles to break. |
+| What proves a change safe? | `src/proof/prove.ts` — applies the plan to a throwaway clone, re-extracts, and checks the fact hashes match (state) and seeded rows survive (data). |
+| Where does product-specific scope live? | `src/policy/` — `resolveView(facts, policy, capability, baseline)` projects the managed view; `src/policy/supabase.ts` is the Supabase package. Never in core diff/plan. |
+
+## Adding a new object kind
+
+1. **Identity** — add the kind to the `StableId` union + codec in `src/core/stable-id.ts`.
+2. **Extract** — query its facts (and `pg_depend`-sourced dependency edges) in
+   `src/extract/extract.ts`; emit identity PARTS as columns, never build id
+   strings in SQL (the library codec does that).
+3. **Rules** — add the kind's entry to the rule table in `src/plan/rules.ts`
+   (`create`/`drop`/`alter`/attribute rules + flags like `weight`,
+   `rebuildable`, `cascadesToChildren`).
+4. **Unit test** — a focused serialization test next to the rule if useful.
+5. **Corpus scenario** — add `corpus/<kind>-operations--<case>/{a,b}.sql`; it runs
+   both directions through the full proof loop (state + data).
+6. **Coverage** — update `packages/pg-delta-next/COVERAGE.md`.
+
+The diff, sort, and proof layers are generic — steps 1–3 are usually all that a
+new kind needs; the engine never grows a per-kind `if`.
+
+## Running tests fast (local)
+
+- Unit (no Docker): from outside the package dir, `bun test <abs path to src/...>`.
+- One corpus scenario: `PGDELTA_NEXT_ONLY=<name> PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts`.
+- Whole corpus, parallel: `PGDELTA_NEXT_CONCURRENCY=8 PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts` (~3× faster; role/cluster scenarios run serially automatically).
+- Live progress on a piped run: add `PGDELTA_NEXT_PROGRESS=1`.
+
+See `.github/agents/pg-toolbelt.md` for the full testing discipline.

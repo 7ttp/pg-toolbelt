@@ -8,13 +8,26 @@ never silently dropped.
 
 schema, role (+ config), role membership, default privilege, extension,
 table (incl. partitioned/partitions, INHERITS, replica identity), column,
-default, constraint (table + domain), index, sequence (+ OWNED BY), view,
+default, constraint (table + domain + foreign-table CHECK), index, sequence (+ OWNED BY), view,
 materialized view, function, procedure, aggregate, trigger, policy, rewrite
 rule, event trigger, domain, enum / composite / range type, collation,
 publication, subscription, FDW, server, user mapping, foreign table.
 
 Global satellite facts (one rule each, any target kind): comment, ACL
 (acldefault-normalized), security label.
+
+### Scope notes (where a family is partially scoped)
+
+Most families are fully modeled end-to-end. The cases worth calling out — so
+"modeled" is never read as "modeled without limits":
+
+| Family | Extracted | Planned / Proven | Scope notes |
+|---|---|---|---|
+| Constraints | table + domain + foreign-table CHECK | yes | foreign tables carry only CHECK (no PK/FK/UNIQUE/EXCLUSION); serialized via `ALTER FOREIGN TABLE` |
+| Foreign tables | yes (columns, options, local CHECK) | yes | inherit/partition-of foreign tables out of scope |
+| Security labels | yes (`SECURITY LABEL`) | yes | needs a provider; CI uses the `dummy_seclabel` image |
+| Extension members | observed via `memberOfExtension` edges | projected out by default | sub-entity member families use the extract-time anti-join (tier-4-deferrals.md) |
+| Not modeled | — | — | casts, operators (class/family), text-search, statistics, transforms, user languages: **detected + reported** as `unmodeled_kind`, never silently dropped |
 
 Ownership is modeled as an `owner` EDGE (object --owner--> role), not a payload
 field: it diffs as an edge link/unlink that the planner renders as `ALTER …

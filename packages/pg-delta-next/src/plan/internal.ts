@@ -114,6 +114,19 @@ export function buildActionGraph(
             ).consumes.some((c) => producesKeys.has(encodeId(c)));
             if (!altererConsumesProduct) edges.push([alterer, index]);
           }
+          // A produced fact's DEPENDS edge must resolve to something this plan
+          // produces or the target already has — "it's in the desired view" is
+          // NOT enough: a policy filter can hide the delta that would create the
+          // dependency, leaving a CREATE that references a missing object (P0-1).
+          // (An altered-in-place dependency is in `source`, so this never fires
+          // for it; built-in endpoints resolve to no edge at all.)
+          if (edge.kind === "depends" && !source.has(edge.to)) {
+            throw new Error(
+              `missing requirement: action "${action.sql}" produces ${encodeId(id)}, ` +
+                `which depends on ${targetKey} — neither produced by this plan nor ` +
+                `present on the target${desired.has(edge.to) ? " (a filter may be hiding its creation)" : ""}`,
+            );
+          }
         }
       }
     }

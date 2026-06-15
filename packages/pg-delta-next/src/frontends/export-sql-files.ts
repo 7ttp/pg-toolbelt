@@ -70,31 +70,46 @@ const TABLE_SCOPED = new Set([
   "rule",
 ]);
 
+/**
+ * Make a database identifier safe as a single path segment: PostgreSQL names
+ * can contain `/`, `\`, `..`, and other path-significant characters, which
+ * would otherwise let an object name escape the output directory or collide
+ * with `.`/`..` (review P2). encodeURIComponent handles separators reversibly;
+ * the extra rule encodes dot-only segments (`.`, `..`) which it leaves alone.
+ * Ordinary identifiers (alphanumerics + `_`) pass through unchanged, so the
+ * common export layout is unaffected.
+ */
+function seg(name: string): string {
+  return encodeURIComponent(name).replace(/^\.+$/, (m) =>
+    m.replace(/\./g, "%2E"),
+  );
+}
+
 function pathFor(id: StableId): string {
   const target = fileTarget(id);
   const kind = target.kind;
   const clusterFile = CLUSTER_FILES[kind];
   if (clusterFile !== undefined) return clusterFile;
   if (kind === "extension") {
-    return `cluster/extensions/${(target as { name: string }).name}.sql`;
+    return `cluster/extensions/${seg((target as { name: string }).name)}.sql`;
   }
   if (kind === "schema") {
-    return `schemas/${(target as { name: string }).name}/schema.sql`;
+    return `schemas/${seg((target as { name: string }).name)}/schema.sql`;
   }
   if (TABLE_SCOPED.has(kind)) {
     const t = target as { schema: string; table: string };
-    return `schemas/${t.schema}/tables/${t.table}.sql`;
+    return `schemas/${seg(t.schema)}/tables/${seg(t.table)}.sql`;
   }
   if (kind === "index") {
     // indexes name only (schema, name) — file them with the schema; their
     // CREATE INDEX statement names the table itself
     const t = target as { schema: string; name: string };
-    return `schemas/${t.schema}/indexes/${t.name}.sql`;
+    return `schemas/${seg(t.schema)}/indexes/${seg(t.name)}.sql`;
   }
   const dir = SCHEMA_DIRS[kind];
   if (dir !== undefined) {
     const t = target as { schema: string; name: string };
-    return `schemas/${t.schema}/${dir}/${t.name}.sql`;
+    return `schemas/${seg(t.schema)}/${dir}/${seg(t.name)}.sql`;
   }
   return "cluster/misc.sql";
 }

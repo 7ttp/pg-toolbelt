@@ -12,8 +12,10 @@
  * segment inDoubt.
  */
 import type { Pool } from "pg";
+import type { FactBase } from "../core/fact.ts";
 import { extract } from "../extract/extract.ts";
 import { ENGINE_VERSION, type Plan } from "../plan/plan.ts";
+import { resolveView } from "../policy/policy.ts";
 
 export type ActionStatus = "applied" | "unapplied" | "inDoubt";
 
@@ -34,6 +36,11 @@ export interface ApplyOptions {
   /** per-segment lock/statement timeouts (operational policy) */
   lockTimeoutMs?: number;
   statementTimeoutMs?: number;
+  /** resolved platform baseline (§3.9), required to reconstruct the fingerprint
+   *  gate for a baseline-shaped plan — the baseline is NOT carried in the plan
+   *  artifact. If the plan's policy declares a baseline and this is absent, the
+   *  gate fails loudly rather than mis-comparing. */
+  baseline?: FactBase;
 }
 
 interface Segment {
@@ -109,10 +116,33 @@ export async function apply(
     );
   }
   if (options?.fingerprintGate !== false) {
-    const current = await extract(target);
-    if (current.factBase.rootHash !== thePlan.source.fingerprint) {
+    // Gate against the SAME managed view the plan was produced from (P0-2).
+    // plan() fingerprints the resolveView'd source (extension-member + policy +
+    // capability + baseline projection), so the raw re-extract must be resolved
+    // the same way before comparing — otherwise an excluded object that is
+    // present on the real database (an extension's internals, a policy-scoped
+    // schema/role) reads as drift and rejects a valid scoped plan.
+    if (
+      thePlan.policy?.baseline !== undefined &&
+      options?.baseline === undefined
+    ) {
       throw new Error(
-        `apply: fingerprint gate failed — the target's state (${current.factBase.rootHash.slice(0, 12)}…) is not the plan's source (${thePlan.source.fingerprint.slice(0, 12)}…); re-plan against the current state`,
+        `apply: plan was produced with policy "${thePlan.policy.id}" declaring baseline ` +
+          `"${thePlan.policy.baseline}", but no baseline was supplied to reconstruct the ` +
+          `fingerprint gate. Pass the resolved baseline as options.baseline, or skip the ` +
+          `gate with fingerprintGate:false if convergence was already proven.`,
+      );
+    }
+    const current = await extract(target);
+    const view = resolveView(
+      current.factBase,
+      thePlan.policy,
+      thePlan.capability,
+      options?.baseline,
+    );
+    if (view.rootHash !== thePlan.source.fingerprint) {
+      throw new Error(
+        `apply: fingerprint gate failed — the target's resolved state (${view.rootHash.slice(0, 12)}…) is not the plan's source (${thePlan.source.fingerprint.slice(0, 12)}…); re-plan against the current state`,
       );
     }
   }
@@ -147,14 +177,23 @@ export async function apply(
         try {
           for (const sql of preamble(false)) await client.query(sql);
           await client.query(action.sql);
-          await client.query("RESET ALL");
         } catch (error) {
+          // a failed non-transactional DDL is NOT safely unapplied — it can
+          // leave durable side effects (e.g. an INVALID index from a cancelled
+          // CREATE INDEX CONCURRENTLY). Report it inDoubt so the caller knows
+          // the database must be re-extracted before retry (review P1).
+          statuses[index] = "inDoubt";
           return {
             status: "failed",
             appliedActions,
             actionStatuses: statuses,
             error: errorEntry(index, action.sql, error),
           };
+        } finally {
+          // ALWAYS restore session state before the client returns to the pool,
+          // on success or failure — RESET ALL must not be skipped by the catch's
+          // early return, and a reset failure must not flip the action's outcome.
+          await client.query("RESET ALL").catch(() => {});
         }
         statuses[index] = "applied";
         appliedActions += 1;

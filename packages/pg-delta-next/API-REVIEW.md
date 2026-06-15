@@ -58,7 +58,7 @@ the documented vocabulary.
 | `Action` | type | One executable DDL statement with `sql`, `verb`, `produces/consumes/destroys/releases`, `transactionality`, `lockClass`, `dataLoss`, `rewriteRisk`. The unit the executor runs. | — | — | ✓ | ✓ |
 | `Plan` | type | `{ actions, deltas, filteredDeltas, renameCandidates, safetyReport, source/target fingerprints, … }` — the complete output of the planner. | ✓ | ✓ | ✓ | ✓ |
 | `SafetyReport` | type | Aggregated per-plan counts: destructive, rewriteRisk, nonTransactional actions; lock class histogram. | — | — | ✓ | — |
-| `PlanOptions` | type | `{ params?, policy?, renames?, acceptRenames?, compact? }` — the complete option bag for `plan()`. | — | — | ✓ | — |
+| `PlanOptions` | type | `{ params?, policy?, baseline?, renames?, acceptRenames?, compact?, capability? }` — the complete option bag for `plan()`. `baseline?` is the resolved platform `FactBase` whose facts are subtracted before diffing; `capability?` is the `ApplierCapability` that projects out operations the applier cannot execute. | — | — | ✓ | — |
 | `plan` | function | `(source, desired: FactBase, options?: PlanOptions) → Plan` — the planner: deltas × rule table → topologically sorted actions. | ✓ | ✓ | ✓ | — |
 | `serializePlan` | function | `Plan → string` — bigint-safe JSON artifact, version-tagged. | — | — | ✓ | — |
 | `parsePlan` | function | `string → Plan` — validates formatVersion/engineVersion; throws on mismatch. | — | — | ✓ | — |

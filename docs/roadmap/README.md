@@ -2,7 +2,7 @@
 
 - **Date**: 2026-06-14
 - **Branch**: `feat/pg-delta-next`
-- **Parent**: [`../pg-delta-next-remaining-work.md`](v1.md)
+- **Parent**: [`v1.md`](v1.md)
   is the one-page roadmap (the **correctness-first v1** plan). This folder is the
   per-item implementation detail.
 
@@ -12,7 +12,7 @@ Engine code-complete (stages 0–9), hardening plan + 4b + security-label e2e, a
 the **managed-view architecture** ([`../managed-view-architecture.md`](../architecture/managed-view-architecture.md):
 `skipSchema`/`skipAuthorization` eliminated, ownership-as-edge, fact-level view,
 applier capability). The validation harness runs in CI on **PG 15/17/18**:
-corpus 209×2 (418 cases) under the proof loop (`EXPECTED_RED` empty), a new-vs-old
+corpus 210×2 (420 cases) under the proof loop (`EXPECTED_RED` empty), a new-vs-old
 **differential** with a hard regression gate, a **generative soak** with an
 enforced kind-coverage checklist, reviewed public API. **The engine + its
 correctness machinery are v1-ready** — see the parent doc for the cut plan.
@@ -76,6 +76,10 @@ correctness machinery are v1-ready** — see the parent doc for the cut plan.
   rebuild; blocked on the CLI-1431 declarative-format decision (Phase A ships).
 - 🟢 [Stage 10 cutover](tier-2-stage-10-cutover.md) — naming, deprecation,
   migration guide, after v1 + perf land.
+- 🟡 [Engine refactors](tier-3-engine-refactors.md) — locality/allocation
+  improvements deferred from the [2026-06-15 branch review](../archive/pg-delta-next-branch-review-2026-06-15.md)
+  (whose correctness findings shipped): projectedDesired-canonical planning,
+  precomputed planner maps, extractor/rules split by family. Not bugs.
 
 ## Deliberate deferrals (not blocking any milestone)
 

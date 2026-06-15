@@ -12,10 +12,14 @@
  * `pg_export_snapshot()` are a later optimization; serial is the documented
  * fallback and plenty fast at current scale.)
  *
- * v1 kind coverage: schema, role, extension, table (+ column, default,
- * constraint, trigger, policy), index, sequence, view, materializedView,
- * procedure/function, comments, ACLs. Extension-member objects are excluded
- * for now (provenance-as-edges arrives with the policy layer, stage 8).
+ * Kind coverage is the full v1 set — see packages/pg-delta-next/COVERAGE.md for
+ * the authoritative list (schemas, roles + memberships, extensions, tables and
+ * their sub-facts, foreign tables + their constraints, domains, types, indexes,
+ * sequences, views, materialized views, procedures/aggregates, collations,
+ * policies, triggers, event triggers, publications, subscriptions, FDWs,
+ * servers, user mappings, comments, ACLs, security labels). Extension-member
+ * objects carry `memberOfExtension` provenance edges and are projected out of
+ * the managed view by default (managed-view architecture).
  */
 import type { Pool, PoolClient } from "pg";
 import type { Diagnostic } from "../core/diagnostic.ts";
@@ -121,7 +125,10 @@ const USER_SCHEMA_FILTER = `
   AND n.nspname NOT LIKE 'pg\\_toast%'
   AND n.nspname NOT LIKE 'pg\\_temp%'`;
 
-/** Anti-join fragment: exclude objects owned by extensions (stage-8 TODO: provenance edges instead). */
+/** Anti-join fragment: exclude objects owned by extensions, for the sub-entity
+ *  and rare member-root families that are NOT yet flipped to `memberOfExtension`
+ *  provenance edges (the flipped families use memberExtensionExpr/pushMemberEdge
+ *  instead; see COVERAGE.md "extension member handling" + tier-4-deferrals.md). */
 function notExtensionMember(classid: string, oidExpr: string): string {
   return `NOT EXISTS (
     SELECT 1 FROM pg_depend ext_d
@@ -582,14 +589,18 @@ async function extractOnClient(
   // ── constraints ──────────────────────────────────────────────────────
   for (const row of await q(`
     SELECT n.nspname AS schema, c.relname AS table, con.conname AS name,
+           c.relkind AS table_kind,
            pg_get_constraintdef(con.oid) AS def,
            con.contype AS type, con.convalidated AS validated,
            obj_description(con.oid, 'pg_constraint') AS comment
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    -- 'f' = foreign tables: they carry only CHECK constraints (no p/u/f/x),
+    -- so the contype filter already scopes them; serialized via ALTER FOREIGN
+    -- TABLE (constraintTarget keys off the parent's foreignTable kind).
     WHERE con.contype IN ('p', 'u', 'f', 'c', 'x') AND con.conislocal
-      AND c.relkind IN ('r', 'p') AND ${USER_SCHEMA_FILTER}
+      AND c.relkind IN ('r', 'p', 'f') AND ${USER_SCHEMA_FILTER}
       AND ${notExtensionMember("pg_class", "c.oid")}
     ORDER BY n.nspname, c.relname, con.conname`)) {
     pushWithMeta(
@@ -601,7 +612,7 @@ async function extractOnClient(
           name: String(row["name"]),
         },
         parent: {
-          kind: "table",
+          kind: String(row["table_kind"]) === "f" ? "foreignTable" : "table",
           schema: String(row["schema"]),
           name: String(row["table"]),
         },
@@ -1923,6 +1934,23 @@ async function extractOnClient(
   //                     gap, surfaced as a diagnostic (stage-2 doctrine).
   //  - resolved id whose fact is absent → a dangling edge, already turned
   //                     into a diagnostic by the FactBase constructor.
+  // A user object can never live in a system schema, so any endpoint resolving
+  // into one is a built-in PostgreSQL guarantees — never extracted as a fact.
+  // Resolving it to "skip" (like a null endpoint) keeps the edge set identical
+  // (such an edge was already dropped as dangling by the FactBase constructor)
+  // while removing the flood of system `dangling_edge` diagnostics that would
+  // otherwise bury real user-facing warnings (review P1).
+  const isSystemScopedId = (id: StableId): boolean => {
+    const sysName = (n: string): boolean =>
+      n === "pg_catalog" ||
+      n === "information_schema" ||
+      n.startsWith("pg_toast") ||
+      n.startsWith("pg_temp");
+    const schema = (id as { schema?: unknown }).schema;
+    if (typeof schema === "string" && sysName(schema)) return true;
+    if (id.kind === "schema") return sysName((id as { name: string }).name);
+    return false;
+  };
   const resolveEndpoint = (
     raw: unknown,
     role: string,
@@ -1935,7 +1963,9 @@ async function extractOnClient(
         severity: "warning",
         message: `pg_depend ${role} ${JSON.stringify(raw)} was recognized by the resolver but the codec could not build its id — resolver/codec mismatch`,
       });
+      return id;
     }
+    if (isSystemScopedId(id)) return undefined; // built-in catalog object — skip quietly
     return id;
   };
   const seenEdges = new Set<string>();

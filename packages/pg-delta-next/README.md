@@ -47,7 +47,7 @@ enum/composite/range types, collation, publication, subscription,
 FDW/server/user-mapping/foreign-table, comments (one global rule),
 ACLs (one global rule, REVOKE-first).
 
-The corpus (`corpus/`, ~195 scenarios) is the port of the old pg-delta
+The corpus (`corpus/`, ~210 scenarios) is the port of the old pg-delta
 integration suite — see `PORTING.md` for the per-case ledger and the
 not-ported-with-reason list (Supabase-image, policy-layer/stage-8,
 dummy_seclabel, stage-9 renames/export).

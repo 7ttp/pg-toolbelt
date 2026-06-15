@@ -13,7 +13,7 @@
 > the first performance pass — **4.2× faster extraction**.
 
 - **Audience**: engineers, reviewers, and decision-makers evaluating the rewrite.
-- **Status**: engine code-complete and proven on a **209-scenario corpus (418
+- **Status**: engine code-complete and proven on a **210-scenario corpus (420
   cases, both directions)** across PostgreSQL 15/17/18 — all green; cutting v1 on
   correctness. See [roadmap/v1.md](roadmap/v1.md).
 - **Deep design**: [architecture/target-architecture.md](architecture/target-architecture.md)
@@ -193,9 +193,9 @@ flowchart LR
 
 The old engine carried **~34,000 lines of tests** — largely per-type unit tests
 asserting exact SQL strings. The new engine proves correctness *behaviourally*
-instead, in **8,444 lines across 52 files**: a **209-scenario corpus, run in both
-directions (build and teardown) under the full proof loop, on PostgreSQL 15, 17
-and 18** (418 cases per version — all green), plus a **differential harness** and
+instead, behaviourally: a **210-scenario corpus, run in both directions (build
+and teardown) under the full proof loop, on PostgreSQL 15, 17 and 18** (420
+cases per version — all green), plus a **differential harness** and
 a **generative soak** (below). Correctness is demonstrated by "apply it and
 re-extract — does it match?", not by pinning byte strings.
 

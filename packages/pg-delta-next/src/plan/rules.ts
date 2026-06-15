@@ -292,7 +292,12 @@ function sequenceOwnedBySpecs(
 /** Constraints attach to tables OR domains; the parent kind decides. */
 function constraintTarget(fact: Fact): string {
   const id = fact.id as { schema: string; table: string };
-  const keyword = fact.parent?.kind === "domain" ? "DOMAIN" : "TABLE";
+  const keyword =
+    fact.parent?.kind === "domain"
+      ? "DOMAIN"
+      : fact.parent?.kind === "foreignTable"
+        ? "FOREIGN TABLE"
+        : "TABLE";
   return `ALTER ${keyword} ${rel(id.schema, id.table)}`;
 }
 

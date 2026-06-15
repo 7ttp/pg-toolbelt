@@ -85,6 +85,11 @@ export interface ProveOptions {
    *  the proof's view symmetrically so a capability-excluded object (e.g. an
    *  FDW ACL on a non-superuser target) doesn't reappear as drift. */
   capability?: ApplierCapability;
+  /** the resolved platform baseline the plan was produced with (§3.9). The
+   *  baseline is NOT carried in the plan artifact, so a baseline-shaped plan
+   *  must be re-supplied here; otherwise the proof cannot reconstruct the same
+   *  view it diffed and fails loudly (P0-2). */
+  baseline?: FactBase;
 }
 
 interface TableStat {
@@ -158,7 +163,7 @@ async function tableStats(pool: Pool): Promise<Map<string, TableStat>> {
     string
   >;
   rels.rows.forEach((r, i) => {
-    stats.set(`${r.schema}.${r.name}`, {
+    stats.set(relKey(r.schema, r.name), {
       rows: Number(countRow[`c${i}`]),
       relfilenode: r.relfilenode,
       schemaSig: r.schemasig ?? "",
@@ -183,7 +188,7 @@ async function tableStats(pool: Pool): Promise<Map<string, TableStat>> {
       string
     >;
     nonEmpty.forEach((r, i) => {
-      const stat = stats.get(`${r.schema}.${r.name}`);
+      const stat = stats.get(relKey(r.schema, r.name));
       const fp = fpRow[`f${i}`];
       if (stat && fp !== undefined) stat.content = fp;
     });
@@ -191,16 +196,27 @@ async function tableStats(pool: Pool): Promise<Map<string, TableStat>> {
   return stats;
 }
 
-/** The table relation a fact id belongs to, as "schema.name", or undefined
- *  for ids that are not table-scoped. */
+/** Collision-free key for a (schema, name) relation: a JSON tuple, NOT a dotted
+ *  string — PostgreSQL identifiers can contain dots, so `${schema}.${name}` is
+ *  ambiguous (schema "a.b"/table "c" vs schema "a"/table "b.c") and a `.split`
+ *  would mis-quote the seed target (review P2). */
+function relKey(schema: string, name: string): string {
+  return JSON.stringify([schema, name]);
+}
+function parseRelKey(key: string): [string, string] {
+  return JSON.parse(key) as [string, string];
+}
+
+/** The table relation a fact id belongs to, as a relKey, or undefined for ids
+ *  that are not table-scoped. */
 function tableRelationOf(id: StableId): string | undefined {
   if (id.kind === "table" || id.kind === "materializedView") {
     const t = id as { schema: string; name: string };
-    return `${t.schema}.${t.name}`;
+    return relKey(t.schema, t.name);
   }
   const t = id as { schema?: string; table?: string };
   if (typeof t.schema === "string" && typeof t.table === "string") {
-    return `${t.schema}.${t.table}`;
+    return relKey(t.schema, t.table);
   }
   return undefined;
 }
@@ -223,7 +239,7 @@ async function autoSeedEmptyTables(
   candidates: Iterable<string>,
 ): Promise<void> {
   for (const table of candidates) {
-    const [schema, name] = table.split(".") as [string, string];
+    const [schema, name] = parseRelKey(table);
     // best-effort: DEFAULT VALUES only succeeds when every column is
     // nullable or defaulted; skip tables it can't satisfy (NOT NULL
     // without default, etc.) rather than fabricating typed values
@@ -393,13 +409,28 @@ export async function provePlan(
   // the exact same view without the caller re-supplying them.
   const policy = options.policy ?? thePlan.policy;
   const capability = options.capability ?? thePlan.capability;
-  const provenFb = resolveView(proven.factBase, policy, capability);
+  // baseline is NOT carried in the artifact — a baseline-shaped plan must be
+  // re-supplied with it, or the proof cannot reconstruct the diffed view (P0-2).
+  if (policy?.baseline !== undefined && options.baseline === undefined) {
+    throw new Error(
+      `provePlan: plan was produced with policy "${policy.id}" declaring baseline ` +
+        `"${policy.baseline}", but no baseline was supplied; pass the resolved baseline ` +
+        `as options.baseline so the proof compares the same view the plan diffed.`,
+    );
+  }
+  const provenFb = resolveView(
+    proven.factBase,
+    policy,
+    capability,
+    options.baseline,
+  );
   // target the PROJECTED desired: the plan only applies kept deltas, so it
   // converges to `desired` minus the policy-filtered changes (review #2).
   const target = resolveView(
     projectTarget(desired, thePlan.filteredDeltas),
     policy,
     capability,
+    options.baseline,
   );
   const driftDeltas = diff(provenFb, target);
   const after = await tableStats(clonePool);
