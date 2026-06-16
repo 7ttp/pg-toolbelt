@@ -373,3 +373,132 @@ describe("owner edge: owner residue — applier can't set owner → fail fast", 
     expect(() => plan(srcState.factBase, dstState.factBase)).not.toThrow();
   }, 120_000);
 });
+
+// ---------------------------------------------------------------------------
+// Test (f): ROLE-ONLY rename carries ownership of a STABLE object. The table
+// id does not change; only its owner role is renamed. PostgreSQL carries the
+// owner by OID, so NO ALTER … OWNER TO is needed and the role rename must not
+// deadlock an owner action (third follow-up review P1). Proven against the
+// sacrificial source directly (roles are cluster-global).
+// ---------------------------------------------------------------------------
+
+describe("owner edge: role-only rename carries ownership of a stable object (P1)", () => {
+  test("ALTER ROLE rename only, no OWNER TO, no cycle; proof clean", async () => {
+    const [clusterA, clusterB] = await isolatedClusterPair();
+    const srcDb = await clusterA.createDb("roleonly_src");
+    const dstDb = await clusterB.createDb("roleonly_dst");
+    dbs.push(srcDb, dstDb);
+
+    // distinctive config so the rr1→rr2 role rename is unambiguous despite
+    // other tests' cluster-global roles
+    await clusterA.adminPool
+      .query(`CREATE ROLE rolly_r1 NOLOGIN`)
+      .catch(() => {});
+    await clusterA.adminPool
+      .query(`ALTER ROLE rolly_r1 SET statement_timeout = '24680ms'`)
+      .catch(() => {});
+    await srcDb.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.t (id int, name text);
+        ALTER TABLE app.t OWNER TO rolly_r1;
+      `);
+
+    await clusterB.adminPool
+      .query(`CREATE ROLE rolly_r2 NOLOGIN`)
+      .catch(() => {});
+    await clusterB.adminPool
+      .query(`ALTER ROLE rolly_r2 SET statement_timeout = '24680ms'`)
+      .catch(() => {});
+    await dstDb.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.t (id int, name text);
+        ALTER TABLE app.t OWNER TO rolly_r2;
+      `);
+
+    const [srcState, dstState] = await Promise.all([
+      extract(srcDb.pool),
+      extract(dstDb.pool),
+    ]);
+    const thePlan = plan(srcState.factBase, dstState.factBase, {
+      renames: "auto",
+    });
+
+    expect(
+      thePlan.actions.some(
+        (a) => a.sql.includes("ALTER ROLE") && a.sql.includes("RENAME TO"),
+      ),
+    ).toBe(true);
+    // the table id is stable and the owner is carried by the role rename — no
+    // ALTER … OWNER TO
+    expect(
+      thePlan.actions.filter((a) => a.sql.includes("OWNER TO")),
+    ).toHaveLength(0);
+
+    const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
+    expect(verdict.applyError).toBeUndefined();
+    expect(verdict.driftDeltas).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// Test (g): a role rename CARRIES its default privileges (P2). Identical
+// default privileges FOR the renamed role are carried by OID — no ALTER
+// DEFAULT PRIVILEGES churn — and the plan still converges.
+// ---------------------------------------------------------------------------
+
+describe("owner edge: role rename carries default privileges (P2)", () => {
+  test("no ALTER DEFAULT PRIVILEGES churn; proof clean", async () => {
+    const [clusterA, clusterB] = await isolatedClusterPair();
+    const srcDb = await clusterA.createDb("defacl_carry_src");
+    const dstDb = await clusterB.createDb("defacl_carry_dst");
+    dbs.push(srcDb, dstDb);
+
+    await clusterA.adminPool
+      .query(`CREATE ROLE dacl_r1 NOLOGIN`)
+      .catch(() => {});
+    await clusterA.adminPool
+      .query(`ALTER ROLE dacl_r1 SET statement_timeout = '13579ms'`)
+      .catch(() => {});
+    await srcDb.pool.query(`
+        CREATE SCHEMA app;
+        ALTER DEFAULT PRIVILEGES FOR ROLE dacl_r1 IN SCHEMA app
+          GRANT SELECT ON TABLES TO PUBLIC;
+      `);
+
+    await clusterB.adminPool
+      .query(`CREATE ROLE dacl_r2 NOLOGIN`)
+      .catch(() => {});
+    await clusterB.adminPool
+      .query(`ALTER ROLE dacl_r2 SET statement_timeout = '13579ms'`)
+      .catch(() => {});
+    await dstDb.pool.query(`
+        CREATE SCHEMA app;
+        ALTER DEFAULT PRIVILEGES FOR ROLE dacl_r2 IN SCHEMA app
+          GRANT SELECT ON TABLES TO PUBLIC;
+      `);
+
+    const [srcState, dstState] = await Promise.all([
+      extract(srcDb.pool),
+      extract(dstDb.pool),
+    ]);
+    const thePlan = plan(srcState.factBase, dstState.factBase, {
+      renames: "auto",
+    });
+
+    expect(
+      thePlan.actions.some(
+        (a) => a.sql.includes("ALTER ROLE") && a.sql.includes("RENAME TO"),
+      ),
+    ).toBe(true);
+    // the default privilege is carried by the role rename's OID — no DDL
+    expect(
+      thePlan.actions.filter((a) => a.sql.includes("DEFAULT PRIVILEGES")),
+    ).toHaveLength(0);
+
+    const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
+    expect(verdict.applyError).toBeUndefined();
+    expect(verdict.driftDeltas).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  }, 120_000);
+});

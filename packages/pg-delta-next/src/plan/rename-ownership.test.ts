@@ -119,3 +119,136 @@ describe("accepted table rename + accepted owner-role rename (review P1 #2)", ()
     expect(p.actions.filter((a) => a.sql.includes("OWNER TO"))).toHaveLength(0);
   });
 });
+
+const stableTable: StableId = { kind: "table", schema: "app", name: "t" };
+
+describe("role-only rename carries ownership on a stable object (review P1)", () => {
+  // source: r1 owns app.t; desired: structurally identical r2 owns the SAME
+  // app.t. Only the role is renamed; the table id does not change. PostgreSQL
+  // carries the owner by OID across ALTER ROLE … RENAME, so no ALTER … OWNER TO
+  // is needed and the role rename must not deadlock an owner action.
+  const source = buildFactBase(
+    [
+      { id: role1, payload: rolePayload(false) },
+      { id: schema, payload: {} },
+      { id: stableTable, parent: schema, payload: tablePayload() },
+    ],
+    [{ from: stableTable, to: role1, kind: "owner" }],
+  );
+  const desired = buildFactBase(
+    [
+      { id: role2, payload: rolePayload(false) },
+      { id: schema, payload: {} },
+      { id: stableTable, parent: schema, payload: tablePayload() },
+    ],
+    [{ from: stableTable, to: role2, kind: "owner" }],
+  );
+
+  test("no cycle, ALTER ROLE rename emitted, no spurious OWNER TO", () => {
+    let p!: ReturnType<typeof plan>;
+    expect(() => {
+      p = plan(source, desired, { renames: "auto", compact: false });
+    }).not.toThrow();
+    expect(
+      p.actions.some((a) => a.sql.includes('ALTER ROLE "r1" RENAME TO "r2"')),
+    ).toBe(true);
+    expect(p.actions.filter((a) => a.sql.includes("OWNER TO"))).toHaveLength(0);
+  });
+
+  test("a restrictive capability does not falsely fail (no owner action to authorize)", () => {
+    // applier cannot set owner r2; but no ALTER … OWNER TO is required, so plan
+    // must not throw the capability error.
+    expect(() =>
+      plan(source, desired, {
+        renames: "auto",
+        compact: false,
+        capability: { role: "applier", isSuperuser: false, memberOf: [] },
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("role rename carries role-name-bearing facts (review P2)", () => {
+  const dpPayload = { privileges: ["SELECT"], grantable: [] };
+
+  test("identical default privileges are carried, not churned (no ALTER DEFAULT PRIVILEGES)", () => {
+    const dp1: StableId = {
+      kind: "defaultPrivilege",
+      role: "r1",
+      schema: "app",
+      objtype: "r",
+      grantee: "PUBLIC",
+    };
+    const dp2: StableId = {
+      kind: "defaultPrivilege",
+      role: "r2",
+      schema: "app",
+      objtype: "r",
+      grantee: "PUBLIC",
+    };
+    const source = buildFactBase(
+      [
+        { id: role1, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: dp1, payload: dpPayload },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: role2, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: dp2, payload: dpPayload },
+      ],
+      [],
+    );
+
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    expect(
+      p.actions.some((a) => a.sql.includes('ALTER ROLE "r1" RENAME TO "r2"')),
+    ).toBe(true);
+    // the default privilege is carried by the role rename's OID — no DDL
+    expect(
+      p.actions.filter((a) => a.sql.includes("DEFAULT PRIVILEGES")),
+    ).toHaveLength(0);
+    expect(
+      p.actions.filter(
+        (a) => a.sql.includes("GRANT") || a.sql.includes("REVOKE"),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("identical membership is carried, not churned (no GRANT/REVOKE … membership)", () => {
+    // r1 is a member of grp in source; after r1 → r2 the membership is carried
+    const grp: StableId = { kind: "role", name: "grp" };
+    const m1: StableId = { kind: "membership", role: "grp", member: "r1" };
+    const m2: StableId = { kind: "membership", role: "grp", member: "r2" };
+    const source = buildFactBase(
+      [
+        { id: grp, payload: rolePayload(false) },
+        { id: role1, payload: rolePayload(false) },
+        { id: m1, payload: { admin: false } },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: grp, payload: rolePayload(false) },
+        { id: role2, payload: rolePayload(false) },
+        { id: m2, payload: { admin: false } },
+      ],
+      [],
+    );
+
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    expect(
+      p.actions.some((a) => a.sql.includes('ALTER ROLE "r1" RENAME TO "r2"')),
+    ).toBe(true);
+    // the membership is carried — no GRANT/REVOKE role membership churn
+    expect(
+      p.actions.filter(
+        (a) => a.sql.includes("GRANT") || a.sql.includes("REVOKE"),
+      ),
+    ).toHaveLength(0);
+  });
+});
