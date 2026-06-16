@@ -105,6 +105,12 @@ export interface Plan {
    *  inlined so a later prove/apply recovers the SAME view. `memberOf` is an
    *  array → the artifact round-trips losslessly. */
   capability?: ApplierCapability;
+  /** the integration profile that produced this plan, stamped by the CLI when a
+   *  known profile is selected. `apply`/`prove` default to this profile when
+   *  `--profile` is omitted and reject a contradicting `--profile`, so the
+   *  plan == prove == apply invariant is enforced by the artifact, not just by a
+   *  comment. Absent on library-produced (raw) artifacts. */
+  profile?: { id: string };
   /** every rename candidate found, applied or not — "prompt" mode renders
    *  these as questions; near-misses explain why they degraded (§4.1) */
   renameCandidates: RenameCandidate[];
@@ -143,6 +149,10 @@ export interface PlanOptions {
    *  true })`), or probe directly with `probeApplierCapability` from
    *  `@supabase/pg-delta-next/integrations`. Default unrestricted. */
   capability?: ApplierCapability;
+  /** the integration profile id to stamp on the plan artifact (set by the
+   *  resolved profile's `planOptions`), so `apply`/`prove` can reconstruct the
+   *  same managed view without the operator re-specifying `--profile`. */
+  profile?: { id: string };
 }
 
 // Per-kind graph/suppression policy is DECLARED IN THE RULE TABLE
@@ -956,6 +966,7 @@ export function plan(
     filteredDeltas,
     ...(options?.policy ? { policy: options.policy } : {}),
     ...(options?.capability ? { capability: options.capability } : {}),
+    ...(options?.profile ? { profile: options.profile } : {}),
     renameCandidates,
     actions: finalActions,
     safetyReport,

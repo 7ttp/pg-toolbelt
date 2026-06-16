@@ -195,6 +195,51 @@ describe("CLI: plan", () => {
       await Promise.all([source.drop(), desired.drop()]);
     }
   }, 60_000);
+
+  test("plan stamps the profile id; apply rejects a contradicting --profile (P2)", async () => {
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("cli_profile_src");
+    const desired = await cluster.createDb("cli_profile_dst");
+    try {
+      await desired.pool.query(SCHEMA_SQL);
+      const planFile = join(
+        tmpdir(),
+        `pg-delta-next-profilestamp-${Date.now()}.json`,
+      );
+      // default profile is raw → the artifact is stamped { id: "raw" }
+      const planned = await runCli([
+        "plan",
+        "--source",
+        source.uri,
+        "--desired",
+        desired.uri,
+        "--out",
+        planFile,
+      ]);
+      expect(planned.exitCode).toBe(0);
+
+      const { readFileSync } = await import("node:fs");
+      const { parsePlan } = await import("../src/plan/artifact.ts");
+      const thePlan = parsePlan(readFileSync(planFile, "utf8"));
+      expect(thePlan.profile).toEqual({ id: "raw" });
+
+      // applying a raw-stamped plan with --profile supabase is a mismatch and
+      // must be rejected (exit 2) BEFORE opening the target connection.
+      const mismatch = await runCli([
+        "apply",
+        "--plan",
+        planFile,
+        "--target",
+        source.uri,
+        "--profile",
+        "supabase",
+      ]);
+      expect(mismatch.exitCode).toBe(2);
+      expect(mismatch.stderr).toMatch(/does not match the plan's profile/);
+    } finally {
+      await Promise.all([source.drop(), desired.drop()]);
+    }
+  }, 60_000);
 });
 
 describe("CLI: strict coverage (unmodeled-kind surfacing)", () => {

@@ -116,7 +116,10 @@ export async function resolveProfile(
   return {
     id: profile.id,
     extract: profileExtract,
-    planOptions: { ...view },
+    // stamp the profile id on planOptions so plan() records it on the artifact;
+    // apply/prove then reconstruct this view without the operator repeating
+    // --profile (P2 follow-up).
+    planOptions: { ...view, profile: { id: profile.id } },
     proveOptions: { ...view, reextract: (p) => profileExtract(p) },
     applyOptions: {
       ...(baseline !== undefined ? { baseline } : {}),

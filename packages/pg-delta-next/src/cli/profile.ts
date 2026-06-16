@@ -45,3 +45,32 @@ export function resolveCliProfile(
 ): Promise<ResolvedProfile> {
   return resolveProfile(pool, profileById(id), options);
 }
+
+/**
+ * Reconcile the `--profile` flag with the profile id stamped on a plan artifact
+ * (apply/prove). The apply/prove profile MUST match the plan's, so:
+ *
+ * - `--profile` omitted → use the plan's stamped id (or undefined → raw for a
+ *   legacy/library artifact);
+ * - `--profile` given → use it, but throw if it contradicts the plan's stamp.
+ *
+ * The returned id is fed to {@link resolveCliProfile} / {@link profileById},
+ * which rejects an id unknown to this binary.
+ */
+export function effectiveProfileId(
+  flagId: string | undefined,
+  planProfileId: string | undefined,
+): string | undefined {
+  if (
+    flagId !== undefined &&
+    planProfileId !== undefined &&
+    flagId !== planProfileId
+  ) {
+    throw new UsageError(
+      `--profile ${flagId} does not match the plan's profile "${planProfileId}"; ` +
+        `the apply/prove profile must match the plan profile — omit --profile to use the plan's, ` +
+        `or re-plan with --profile ${flagId}`,
+    );
+  }
+  return flagId ?? planProfileId;
+}

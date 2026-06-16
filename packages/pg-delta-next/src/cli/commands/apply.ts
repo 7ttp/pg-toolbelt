@@ -10,7 +10,11 @@ import { parsePlan } from "../../plan/artifact.ts";
 import { apply } from "../../apply/apply.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
-import { PROFILE_IDS, resolveCliProfile } from "../profile.ts";
+import {
+  effectiveProfileId,
+  PROFILE_IDS,
+  resolveCliProfile,
+} from "../profile.ts";
 
 export async function cmdApply(args: string[]): Promise<void> {
   let parsed;
@@ -39,6 +43,23 @@ export async function cmdApply(args: string[]): Promise<void> {
   const json = readFileSync(planPath, "utf8");
   const thePlan = parsePlan(json);
 
+  // The profile MUST match the one used to plan: it supplies the handler-aware
+  // re-extractor + baseline the fingerprint gate needs to reconstruct the same
+  // managed view (otherwise operational children on the target read as drift).
+  // Default to the profile stamped on the plan artifact; reject a contradicting
+  // --profile up front (before opening a connection) rather than failing
+  // indirectly through the gate.
+  let profileId: string | undefined;
+  try {
+    profileId = effectiveProfileId(flags["profile"], thePlan.profile?.id);
+  } catch (err) {
+    if (err instanceof UsageError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(2);
+    }
+    throw err;
+  }
+
   const tgt = makePool(targetUrl);
   try {
     if (force) {
@@ -46,10 +67,7 @@ export async function cmdApply(args: string[]): Promise<void> {
         "WARNING: --force disables the fingerprint gate. Applying without state verification.\n",
       );
     }
-    // The profile MUST match the one used to plan: it supplies the handler-aware
-    // re-extractor + baseline the fingerprint gate needs to reconstruct the same
-    // managed view (otherwise operational children on the target read as drift).
-    const ctx = await resolveCliProfile(tgt.pool, flags["profile"]);
+    const ctx = await resolveCliProfile(tgt.pool, profileId);
     process.stderr.write(`Applying ${thePlan.actions.length} action(s)...\n`);
 
     const report = await apply(thePlan, tgt.pool, {

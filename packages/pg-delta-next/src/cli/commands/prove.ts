@@ -12,7 +12,11 @@ import { loadSnapshot } from "../../frontends/snapshot-file.ts";
 import { encodeId } from "../../core/stable-id.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
-import { PROFILE_IDS, resolveCliProfile } from "../profile.ts";
+import {
+  effectiveProfileId,
+  PROFILE_IDS,
+  resolveCliProfile,
+} from "../profile.ts";
 
 /**
  * Render a failing `ProofVerdict` as an indented, human-readable report (the
@@ -92,16 +96,28 @@ export async function cmdProve(args: string[]): Promise<void> {
   const thePlan = parsePlan(json);
   const { factBase: desiredFb } = loadSnapshot(snapshotPath);
 
+  // The profile MUST match the one used to plan: it supplies the handler-aware
+  // re-extractor + baseline so the proof reconstructs the SAME managed view it
+  // diffed (otherwise operational children reappear as drift). Default to the
+  // plan's stamped profile; reject a contradicting --profile before opening the
+  // clone. Policy and capability fall back to the plan artifact inside provePlan.
+  let profileId: string | undefined;
+  try {
+    profileId = effectiveProfileId(flags["profile"], thePlan.profile?.id);
+  } catch (err) {
+    if (err instanceof UsageError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(2);
+    }
+    throw err;
+  }
+
   const clone = makePool(cloneUrl);
   try {
     process.stderr.write(
       `Proving plan (${thePlan.actions.length} action(s))...\n`,
     );
-    // The profile MUST match the one used to plan: it supplies the handler-aware
-    // re-extractor + baseline so the proof reconstructs the SAME managed view it
-    // diffed (otherwise operational children reappear as drift). Policy and
-    // capability fall back to the plan artifact inside provePlan.
-    const ctx = await resolveCliProfile(clone.pool, flags["profile"]);
+    const ctx = await resolveCliProfile(clone.pool, profileId);
     const verdict = await provePlan(
       thePlan,
       clone.pool,

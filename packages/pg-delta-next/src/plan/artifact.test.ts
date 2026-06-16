@@ -69,6 +69,17 @@ describe("plan artifact v1", () => {
     });
   });
 
+  test("round-trips the stamped integration profile id (P2 follow-up)", () => {
+    const withProfile: Plan = { ...samplePlan, profile: { id: "supabase" } };
+    const parsed = parsePlan(serializePlan(withProfile));
+    expect(parsed.profile).toEqual({ id: "supabase" });
+  });
+
+  test("a legacy artifact without a profile field parses (profile undefined)", () => {
+    const parsed = parsePlan(serializePlan(samplePlan));
+    expect(parsed.profile).toBeUndefined();
+  });
+
   test("rejects unknown formatVersion", () => {
     const mangled = serializePlan(samplePlan).replace(
       '"formatVersion": 1',

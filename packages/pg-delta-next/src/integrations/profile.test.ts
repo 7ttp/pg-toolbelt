@@ -59,6 +59,13 @@ describe("resolveProfile", () => {
     expect(ctx.applyOptions.baseline).toBeUndefined();
   });
 
+  test("planOptions carries the profile id so plan() can stamp the artifact", async () => {
+    const supa = await resolveProfile(mockPool({}), supabaseProfile);
+    expect(supa.planOptions.profile).toEqual({ id: "supabase" });
+    const raw = await resolveProfile(mockPool({}), rawProfile);
+    expect(raw.planOptions.profile).toEqual({ id: "raw" });
+  });
+
   test("restrictToApplier probes capability and threads it consistently", async () => {
     const ctx = await resolveProfile(
       mockPool({ superuser: false }),
