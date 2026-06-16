@@ -77,6 +77,33 @@ export type StableId =
 
 export type FactKind = StableId["kind"];
 
+/** Every `FactKind`, as a runtime array. The `satisfies` + the `_exhaustive`
+ *  assignment below make this a COMPILE error if a new `StableId` kind is added
+ *  without listing it here — which in turn keeps the role-name-bearing registry
+ *  (role-rename-carry.ts) honest (a new kind must be classified). */
+export const ALL_FACT_KINDS = [
+  ...SIMPLE_KINDS,
+  ...QUALIFIED_KINDS,
+  ...SUBENTITY_KINDS,
+  ...ROUTINE_KINDS,
+  "membership",
+  "userMapping",
+  "typeAttribute",
+  "publicationRel",
+  "publicationSchema",
+  "comment",
+  "acl",
+  "securityLabel",
+  "defaultPrivilege",
+] as const satisfies readonly FactKind[];
+// `satisfies` rejects an entry that is not a FactKind; this assertion rejects a
+// FactKind that is MISSING from the array (it resolves to `never`, so the
+// `= true` fails to compile). Together they pin ALL_FACT_KINDS === FactKind.
+const _allFactKindsCoversUnion: FactKind extends (typeof ALL_FACT_KINDS)[number]
+  ? true
+  : never = true;
+void _allFactKindsCoversUnion;
+
 const SIMPLE = new Set<string>(SIMPLE_KINDS);
 const QUALIFIED = new Set<string>(QUALIFIED_KINDS);
 const SUBENTITY = new Set<string>(SUBENTITY_KINDS);

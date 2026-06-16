@@ -4,6 +4,7 @@
  */
 import { diff, type Delta } from "../core/diff.ts";
 import type { Fact, FactBase } from "../core/fact.ts";
+import { canonicalize, type Payload } from "../core/hash.ts";
 import { encodeId, type StableId } from "../core/stable-id.ts";
 import {
   factMatches,
@@ -34,6 +35,7 @@ import {
   buildRoleRenameMap,
   computeRoleRenameCarry,
   ownerEdgeKey,
+  roleNamesIn,
 } from "./role-rename-carry.ts";
 import {
   KNOWN_PARAMS,
@@ -272,13 +274,36 @@ export function plan(
   // cancelled from the worklists here; carriedOwnerLinks are skipped in the
   // owner-edge loop below (where the role-only-rename owner cycle lived).
   const roleRenameMap = buildRoleRenameMap(acceptedRenames);
-  const { carriedFactKeys, carriedOwnerLinks } = computeRoleRenameCarry(
-    deltas,
-    roleRenameMap,
-  );
+  const { carriedFactKeys, carriedOwnerLinks, changedFacts } =
+    computeRoleRenameCarry(deltas, roleRenameMap);
   for (const key of carriedFactKeys) {
     removed.delete(key);
     added.delete(key);
+  }
+  // A changed pair carries the IDENTITY (old name → new name by OID) but the
+  // payload also changed. Cancel the old-name teardown AND the new-name create,
+  // and capture the facts so the emit phase can mutate the post-rename id
+  // instead (review P2, fourth follow-up). The renamed roles the new id
+  // references order that mutation AFTER the role rename.
+  const targetRoleNames = new Set(roleRenameMap.values());
+  const changedRoleFacts: Array<{
+    toFact: Fact;
+    fromPayload: Payload;
+    orderingConsumes: StableId[];
+  }> = [];
+  for (const { from, to } of changedFacts) {
+    const fromFact = removed.get(encodeId(from));
+    const toFact = added.get(encodeId(to));
+    removed.delete(encodeId(from));
+    added.delete(encodeId(to));
+    if (fromFact === undefined || toFact === undefined) continue;
+    changedRoleFacts.push({
+      toFact,
+      fromPayload: fromFact.payload,
+      orderingConsumes: [...roleNamesIn(to)]
+        .filter((name) => targetRoleNames.has(name))
+        .map((name) => ({ kind: "role", name }) as StableId),
+    });
   }
 
   // ── classify set-deltas: in-place alter vs replace ────────────────────
@@ -677,6 +702,62 @@ export function plan(
       );
       for (const spec of Array.isArray(specs) ? specs : [specs]) {
         pushAction("alter", spec, { consumes: [fact.id] });
+      }
+    }
+  }
+
+  // role-rename changed-pair mutations (review P2, fourth follow-up): the role
+  // rename carries the fact's IDENTITY by OID, so emit only the PAYLOAD change
+  // against the post-rename id — never old-name teardown + new-name create.
+  // The renamed roles the new id references (`orderingConsumes`) order every
+  // emitted action AFTER the `ALTER ROLE … RENAME` that produces them. We must
+  // NOT consume the carried fact id itself: it is neither in `source` nor
+  // produced by any action, so buildActionGraph would flag it missing.
+  for (const { toFact, fromPayload, orderingConsumes } of changedRoleFacts) {
+    const rules = rulesFor(toFact.id.kind);
+    const alterSpecs: ActionSpec[] = [];
+    let needsReplace = false;
+    const attrs = new Set([
+      ...Object.keys(fromPayload),
+      ...Object.keys(toFact.payload),
+    ]);
+    for (const attr of attrs) {
+      const from = fromPayload[attr];
+      const to = toFact.payload[attr];
+      const canon = (v: typeof from): string =>
+        v === undefined ? " absent" : canonicalize(v);
+      if (canon(from) === canon(to)) continue;
+      const attrRule = rules.attributes[attr];
+      if (attrRule === undefined || attrRule === "replace") {
+        // replace-shaped attr (acl/defaultPrivilege): the whole fact is replaced
+        needsReplace = true;
+        continue;
+      }
+      const specs = attrRule.alter(toFact, from, to, projectedDesired, source);
+      alterSpecs.push(...(Array.isArray(specs) ? specs : [specs]));
+    }
+    if (needsReplace) {
+      // drop+create against the carried (post-rename) id. The drop rule reads
+      // only fact.id (no `source` lookup), so it works although `to` is absent
+      // from source; "destroy before re-produce" orders the drop before create.
+      pushAction("drop", rules.drop(toFact), {
+        destroys: [toFact.id],
+        consumes: orderingConsumes,
+      });
+      const createSpecs = rules.create(
+        toFact,
+        projectedDesired,
+        paramsFor(toFact),
+      );
+      createSpecs.forEach((spec, i) => {
+        pushAction("create", spec, {
+          produces: i === 0 ? [toFact.id] : [],
+          consumes: [...(i === 0 ? [] : [toFact.id]), ...orderingConsumes],
+        });
+      });
+    } else {
+      for (const spec of alterSpecs) {
+        pushAction("alter", spec, { consumes: orderingConsumes });
       }
     }
   }

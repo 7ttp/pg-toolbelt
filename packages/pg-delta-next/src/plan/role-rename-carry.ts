@@ -26,7 +26,25 @@
 import type { Delta } from "../core/diff.ts";
 import type { Fact } from "../core/fact.ts";
 import { canonicalize } from "../core/hash.ts";
-import { encodeId, type StableId } from "../core/stable-id.ts";
+import { encodeId, type FactKind, type StableId } from "../core/stable-id.ts";
+
+/**
+ * Every `StableId` kind that embeds a role NAME (and is therefore relabeled by
+ * `relabelRoleNames`). `comment` / `securityLabel` qualify only via a role
+ * `target`; `acl` via its `grantee` (and a role target). A guard test
+ * (role-rename-carry.test.ts) partitions the full `ALL_FACT_KINDS` inventory
+ * against this set, so a NEW role-name-bearing kind cannot slip through
+ * `relabelRoleNames`' default branch silently (review P3).
+ */
+export const ROLE_NAME_BEARING_KINDS: ReadonlySet<FactKind> = new Set([
+  "role",
+  "membership",
+  "userMapping",
+  "defaultPrivilege",
+  "acl",
+  "comment",
+  "securityLabel",
+]);
 
 /** Build the source-role-name → dest-role-name map from accepted renames.
  *  Only role↔role renames contribute; object renames are carried elsewhere. */
@@ -93,6 +111,43 @@ export function relabelRoleNames(
   }
 }
 
+/** Every role NAME a stable id embeds (recursing into comment/acl/securityLabel
+ *  targets). Used to order a post-rename mutation AFTER the role rename by
+ *  consuming the renamed role(s) the id references. */
+export function roleNamesIn(id: StableId): Set<string> {
+  const names = new Set<string>();
+  const walk = (x: StableId): void => {
+    switch (x.kind) {
+      case "role":
+        names.add(x.name);
+        break;
+      case "membership":
+        names.add(x.role);
+        names.add(x.member);
+        break;
+      case "userMapping":
+        names.add(x.role);
+        break;
+      case "defaultPrivilege":
+        names.add(x.role);
+        names.add(x.grantee);
+        break;
+      case "acl":
+        names.add(x.grantee);
+        walk(x.target);
+        break;
+      case "comment":
+      case "securityLabel":
+        walk(x.target);
+        break;
+      default:
+        break;
+    }
+  };
+  walk(id);
+  return names;
+}
+
 /** Encoded key for an `owner` edge — the planner's owner-emission loop skips
  *  links whose key is carried. */
 export function ownerEdgeKey(from: StableId, to: StableId): string {
@@ -100,12 +155,18 @@ export function ownerEdgeKey(from: StableId, to: StableId): string {
 }
 
 export interface RoleRenameCarry {
-  /** encoded ids of remove+add FACT deltas the rename carries — cancel these
-   *  from the planner's `removed`/`added` worklists so no drop/create emits */
+  /** encoded ids of remove+add FACT deltas the rename carries UNCHANGED — cancel
+   *  these from the planner's `removed`/`added` worklists so no drop/create emits */
   carriedFactKeys: Set<string>;
   /** owner LINK edge keys the rename carries — the owner-emission loop skips
    *  these (the role rename already relabels the owner by OID) */
   carriedOwnerLinks: Set<string>;
+  /** role-name-bearing facts whose IDENTITY the rename carries but whose PAYLOAD
+   *  also changed: `from` (old-name remove) → `to` (new-name add). The planner
+   *  cancels both and emits a post-rename MUTATION on `to` (alter, or drop+create
+   *  for replace-shaped attrs) instead of old-name teardown + new-name create
+   *  (review P2, fourth follow-up). */
+  changedFacts: Array<{ from: StableId; to: StableId }>;
 }
 
 /**
@@ -118,9 +179,9 @@ export interface RoleRenameCarry {
  *   - an owner `unlink` whose relabeled target matches an owner `link` on the
  *     SAME object.
  *
- * A pair whose payload ALSO changed is NOT carried — the role reference moves
- * by OID, but the content change still needs its own DDL, so the churn is left
- * intact (and still converges).
+ * A pair whose payload ALSO changed is returned as a `changedFacts` entry: the
+ * rename carries the identity, and the planner mutates the post-rename id (it
+ * does not tear down the old name and recreate the new one).
  */
 export function computeRoleRenameCarry(
   deltas: readonly Delta[],
@@ -128,7 +189,9 @@ export function computeRoleRenameCarry(
 ): RoleRenameCarry {
   const carriedFactKeys = new Set<string>();
   const carriedOwnerLinks = new Set<string>();
-  if (rename.size === 0) return { carriedFactKeys, carriedOwnerLinks };
+  const changedFacts: Array<{ from: StableId; to: StableId }> = [];
+  if (rename.size === 0)
+    return { carriedFactKeys, carriedOwnerLinks, changedFacts };
 
   const addByKey = new Map<string, Fact>();
   const ownerLinkKeys = new Set<string>();
@@ -141,15 +204,18 @@ export function computeRoleRenameCarry(
   for (const d of deltas) {
     if (d.verb === "remove") {
       const sourceKey = encodeId(d.fact.id);
-      const relabeledKey = encodeId(relabelRoleNames(d.fact.id, rename));
+      const relabeled = relabelRoleNames(d.fact.id, rename);
+      const relabeledKey = encodeId(relabeled);
       if (relabeledKey === sourceKey) continue; // references no renamed role
       const add = addByKey.get(relabeledKey);
-      if (
-        add !== undefined &&
-        canonicalize(add.payload) === canonicalize(d.fact.payload)
-      ) {
+      if (add === undefined) continue; // no counterpart → genuine drop, not carried
+      if (canonicalize(add.payload) === canonicalize(d.fact.payload)) {
+        // identical payload → the rename carries it wholesale; no DDL
         carriedFactKeys.add(sourceKey);
         carriedFactKeys.add(relabeledKey);
+      } else {
+        // identity carried, payload changed → mutate the post-rename id
+        changedFacts.push({ from: d.fact.id, to: add.id });
       }
     } else if (d.verb === "unlink" && d.edge.kind === "owner") {
       const to = d.edge.to;
@@ -164,5 +230,5 @@ export function computeRoleRenameCarry(
     }
   }
 
-  return { carriedFactKeys, carriedOwnerLinks };
+  return { carriedFactKeys, carriedOwnerLinks, changedFacts };
 }

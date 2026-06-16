@@ -4,12 +4,19 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { Delta } from "../core/diff.ts";
-import { encodeId, type StableId } from "../core/stable-id.ts";
+import {
+  ALL_FACT_KINDS,
+  encodeId,
+  type FactKind,
+  type StableId,
+} from "../core/stable-id.ts";
 import {
   buildRoleRenameMap,
   computeRoleRenameCarry,
   ownerEdgeKey,
   relabelRoleNames,
+  ROLE_NAME_BEARING_KINDS,
+  roleNamesIn,
 } from "./role-rename-carry.ts";
 
 const rename = new Map([["r1", "r2"]]);
@@ -210,5 +217,155 @@ describe("computeRoleRenameCarry", () => {
     );
     expect(carriedFactKeys.size).toBe(0);
     expect(carriedOwnerLinks.size).toBe(0);
+  });
+
+  test("a changed payload becomes a changedFacts pair, not a carried key", () => {
+    const deltas: Delta[] = [
+      {
+        verb: "remove",
+        fact: {
+          id: dp("r1"),
+          payload: { privileges: ["SELECT"], grantable: [] },
+        },
+      },
+      {
+        verb: "add",
+        fact: {
+          id: dp("r2"),
+          payload: { privileges: ["INSERT"], grantable: [] },
+        },
+      },
+    ];
+    const { carriedFactKeys, changedFacts } = computeRoleRenameCarry(
+      deltas,
+      rename,
+    );
+    expect(carriedFactKeys.size).toBe(0);
+    expect(changedFacts).toHaveLength(1);
+    expect(encodeId(changedFacts[0]!.from)).toBe(encodeId(dp("r1")));
+    expect(encodeId(changedFacts[0]!.to)).toBe(encodeId(dp("r2")));
+  });
+
+  test("a remove with no relabeled counterpart is neither carried nor changed", () => {
+    const deltas: Delta[] = [
+      { verb: "remove", fact: { id: dp("r1"), payload: {} } },
+    ];
+    const { carriedFactKeys, changedFacts } = computeRoleRenameCarry(
+      deltas,
+      rename,
+    );
+    expect(carriedFactKeys.size).toBe(0);
+    expect(changedFacts).toHaveLength(0);
+  });
+});
+
+describe("roleNamesIn", () => {
+  test("collects role names across kinds (recursing into targets)", () => {
+    expect(
+      [...roleNamesIn({ kind: "membership", role: "g", member: "m" })].sort(),
+    ).toEqual(["g", "m"]);
+    expect(
+      [
+        ...roleNamesIn({
+          kind: "defaultPrivilege",
+          role: "owner",
+          schema: "app",
+          objtype: "r",
+          grantee: "PUBLIC",
+        }),
+      ].sort(),
+    ).toEqual(["PUBLIC", "owner"]);
+    expect([
+      ...roleNamesIn({
+        kind: "comment",
+        target: { kind: "role", name: "r1" },
+      }),
+    ]).toEqual(["r1"]);
+    // an object id embeds no role name
+    expect([
+      ...roleNamesIn({ kind: "table", schema: "app", name: "t" }),
+    ]).toEqual([]);
+  });
+});
+
+describe("role-name-bearing kind registry (review P3 guard)", () => {
+  // every StableId kind must be classified as role-name-bearing or not; a NEW
+  // kind added to ALL_FACT_KINDS lands here and fails until it is triaged.
+  const NON_ROLE_BEARING: ReadonlySet<FactKind> = new Set([
+    "schema",
+    "extension",
+    "language",
+    "eventTrigger",
+    "publication",
+    "subscription",
+    "fdw",
+    "server",
+    "table",
+    "view",
+    "materializedView",
+    "foreignTable",
+    "sequence",
+    "index",
+    "collation",
+    "domain",
+    "type",
+    "column",
+    "constraint",
+    "trigger",
+    "rule",
+    "policy",
+    "default",
+    "procedure",
+    "aggregate",
+    "typeAttribute",
+    "publicationRel",
+    "publicationSchema",
+  ]);
+
+  test("ROLE_NAME_BEARING_KINDS and NON_ROLE_BEARING partition ALL_FACT_KINDS", () => {
+    for (const kind of ALL_FACT_KINDS) {
+      const bearing = ROLE_NAME_BEARING_KINDS.has(kind);
+      const nonBearing = NON_ROLE_BEARING.has(kind);
+      // exactly one of the two sets must claim the kind
+      expect(bearing !== nonBearing).toBe(true);
+    }
+    expect(ROLE_NAME_BEARING_KINDS.size + NON_ROLE_BEARING.size).toBe(
+      ALL_FACT_KINDS.length,
+    );
+  });
+
+  test("relabelRoleNames actually transforms every role-name-bearing kind", () => {
+    // each bearing kind, given an id that references the renamed role, must come
+    // back CHANGED — i.e. it is handled in the switch, not the default branch
+    const samples: Record<string, StableId> = {
+      role: { kind: "role", name: "r1" },
+      membership: { kind: "membership", role: "r1", member: "x" },
+      userMapping: { kind: "userMapping", server: "s", role: "r1" },
+      defaultPrivilege: {
+        kind: "defaultPrivilege",
+        role: "r1",
+        schema: null,
+        objtype: "r",
+        grantee: "PUBLIC",
+      },
+      acl: {
+        kind: "acl",
+        target: { kind: "table", schema: "a", name: "t" },
+        grantee: "r1",
+      },
+      comment: { kind: "comment", target: { kind: "role", name: "r1" } },
+      securityLabel: {
+        kind: "securityLabel",
+        target: { kind: "role", name: "r1" },
+        provider: "p",
+      },
+    };
+    for (const kind of ROLE_NAME_BEARING_KINDS) {
+      const sample = samples[kind];
+      expect(sample, `missing sample for ${kind}`).toBeDefined();
+      expect(encodeId(relabelRoleNames(sample!, rename))).not.toBe(
+        encodeId(sample!),
+      );
+    }
   });
 });
