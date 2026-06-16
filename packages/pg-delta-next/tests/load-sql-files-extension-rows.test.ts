@@ -25,82 +25,74 @@ afterAll(async () => {
 });
 
 describe("loadSqlFiles: extension-owned internal rows are not DML", () => {
-  test(
-    "accepts declarative files that seed an extension's own config table",
-    async () => {
-      const cluster = await supabaseCluster();
-      const shadow = await cluster.createDb("loadsql_ext_rows");
-      dbs.push(shadow);
+  test("accepts declarative files that seed an extension's own config table", async () => {
+    const cluster = await supabaseCluster();
+    const shadow = await cluster.createDb("loadsql_ext_rows");
+    dbs.push(shadow);
 
-      // create_parent seeds a row into partman.part_config — an EXTENSION-owned
-      // table (pg_depend deptype 'e'). Pre-fix, that row tripped the DML gate.
-      const result = await loadSqlFiles(
-        [
-          { name: "0_schema.sql", sql: "CREATE SCHEMA partman;" },
-          {
-            name: "1_ext.sql",
-            sql: "CREATE EXTENSION pg_partman WITH SCHEMA partman;",
-          },
-          {
-            name: "2_parent.sql",
-            sql: `CREATE TABLE public.events (
+    // create_parent seeds a row into partman.part_config — an EXTENSION-owned
+    // table (pg_depend deptype 'e'). Pre-fix, that row tripped the DML gate.
+    const result = await loadSqlFiles(
+      [
+        { name: "0_schema.sql", sql: "CREATE SCHEMA partman;" },
+        {
+          name: "1_ext.sql",
+          sql: "CREATE EXTENSION pg_partman WITH SCHEMA partman;",
+        },
+        {
+          name: "2_parent.sql",
+          sql: `CREATE TABLE public.events (
                     id bigint GENERATED ALWAYS AS IDENTITY,
                     created_at timestamptz NOT NULL
                   ) PARTITION BY RANGE (created_at);`,
-          },
-          {
-            name: "3_create_parent.sql",
-            sql: `SELECT partman.create_parent(
+        },
+        {
+          name: "3_create_parent.sql",
+          sql: `SELECT partman.create_parent(
                     p_parent_table := 'public.events',
                     p_control := 'created_at',
                     p_interval := '1 day');`,
-          },
-        ],
-        shadow.pool,
-      );
+        },
+      ],
+      shadow.pool,
+    );
 
-      // the load succeeds: part_config rows are extension-owned, not user DML,
-      // and the partitioned parent is captured as schema.
-      expect(
-        result.factBase.has({
-          kind: "table",
-          schema: "public",
-          name: "events",
-        }),
-      ).toBe(true);
-    },
-    240_000,
-  );
+    // the load succeeds: part_config rows are extension-owned, not user DML,
+    // and the partitioned parent is captured as schema.
+    expect(
+      result.factBase.has({
+        kind: "table",
+        schema: "public",
+        name: "events",
+      }),
+    ).toBe(true);
+  }, 240_000);
 
-  test(
-    "still rejects genuine user DML alongside an extension",
-    async () => {
-      const cluster = await supabaseCluster();
-      const shadow = await cluster.createDb("loadsql_user_dml");
-      dbs.push(shadow);
+  test("still rejects genuine user DML alongside an extension", async () => {
+    const cluster = await supabaseCluster();
+    const shadow = await cluster.createDb("loadsql_user_dml");
+    dbs.push(shadow);
 
-      const error = await loadSqlFiles(
-        [
-          { name: "0_schema.sql", sql: "CREATE SCHEMA partman;" },
-          {
-            name: "1_ext.sql",
-            sql: "CREATE EXTENSION pg_partman WITH SCHEMA partman;",
-          },
-          {
-            name: "2_user.sql",
-            sql: "CREATE TABLE public.t (id int); INSERT INTO public.t VALUES (1);",
-          },
-        ],
-        shadow.pool,
-      ).then(
-        () => null,
-        (e: unknown) => e,
-      );
+    const error = await loadSqlFiles(
+      [
+        { name: "0_schema.sql", sql: "CREATE SCHEMA partman;" },
+        {
+          name: "1_ext.sql",
+          sql: "CREATE EXTENSION pg_partman WITH SCHEMA partman;",
+        },
+        {
+          name: "2_user.sql",
+          sql: "CREATE TABLE public.t (id int); INSERT INTO public.t VALUES (1);",
+        },
+      ],
+      shadow.pool,
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
 
-      expect(error).toBeInstanceOf(ShadowLoadError);
-      expect(String(error)).toMatch(/data statements/);
-      expect(String(error)).toMatch(/public/);
-    },
-    240_000,
-  );
+    expect(error).toBeInstanceOf(ShadowLoadError);
+    expect(String(error)).toMatch(/data statements/);
+    expect(String(error)).toMatch(/public/);
+  }, 240_000);
 });

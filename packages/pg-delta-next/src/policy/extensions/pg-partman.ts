@@ -44,7 +44,10 @@ async function detect(ctx: HandlerContext): Promise<string | null> {
 export const pgPartmanHandler: ExtensionHandler = {
   extension: "pg_partman",
 
-  async capture(ctx: HandlerContext, current: FactBase): Promise<CaptureResult> {
+  async capture(
+    ctx: HandlerContext,
+    current: FactBase,
+  ): Promise<CaptureResult> {
     const schema = await detect(ctx);
     if (schema === null) return { facts: [], edges: [] };
 

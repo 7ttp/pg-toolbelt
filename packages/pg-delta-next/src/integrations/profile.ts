@@ -15,7 +15,6 @@
  * apply` holds by construction (shared option identity), not by comment.
  */
 import type { Pool } from "pg";
-import type { FactBase } from "../core/fact.ts";
 import type { ApplyOptions } from "../apply/apply.ts";
 import {
   extract,

@@ -60,9 +60,13 @@ describe("resolveProfile", () => {
   });
 
   test("restrictToApplier probes capability and threads it consistently", async () => {
-    const ctx = await resolveProfile(mockPool({ superuser: false }), supabaseProfile, {
-      restrictToApplier: true,
-    });
+    const ctx = await resolveProfile(
+      mockPool({ superuser: false }),
+      supabaseProfile,
+      {
+        restrictToApplier: true,
+      },
+    );
     expect(ctx.planOptions.capability).toBeDefined();
     expect(ctx.planOptions.capability?.isSuperuser).toBe(false);
     // the SAME capability object is shared with the proof bundle (plan == prove)
