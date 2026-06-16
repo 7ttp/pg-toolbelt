@@ -266,6 +266,38 @@ against `view(desired)`; the proof re-extracts through the same view; serialize
 params hold only apply-strategy; and there is **zero Supabase-specific knowledge
 in core.**
 
+## Readiness (2026-06-16 — integration profile)
+
+The single-view contract is now reachable from every entry point, not just from
+hand-composed helpers. Status by concern:
+
+- **Current (implemented + wired into the default path).**
+  - `resolveView` is the **single projection point**: baseline → `memberOfExtension`
+    → applier capability → `managedBy` → policy scope. `managedBy` exclusion is
+    unconditional (a no-op without handler edges), so `plan`/`prove`/`apply` all
+    drop operationally-managed objects without any caller-side `excludeManaged`.
+  - Extension handlers run **inside the extraction transaction**
+    (`extract(pool, { handlers })`, `src/extract/handler.ts`) — same snapshot as
+    core facts.
+  - One **`IntegrationProfile`** (`src/integrations/`) owns handlers + policy +
+    baseline + capability; `resolveProfile` resolves them once and bakes them into
+    plan/prove/apply option bundles (shared by reference → `plan == prove ==
+    apply`). `apply` gained a `reextract` option so its fingerprint gate
+    re-extracts handler-aware.
+  - **CLI** `--profile <raw|supabase>` on `plan`/`apply`/`prove`; the public
+    surface is reachable from the package root and the `./integrations` subpath.
+  - `loadSqlFiles` DML detection reuses the extraction scope predicate and excludes
+    extension-owned relations (so an extension's seeded config table is not
+    mistaken for user DML).
+- **v1 required (not yet committed).** A committed Supabase **baseline snapshot**
+  (`supabasePolicy.baseline` stays intentionally unset until then; `resolveBaseline`
+  fail-fasts loudly if a policy declares a baseline with no snapshot).
+- **Phase B (extension intent).** Handlers emit only `managedBy` filter edges
+  today; intent **replay** (`create_parent`, pg_cron jobs) is future work
+  (docs/architecture/extension-intent.md §4.4).
+- **Deferred roadmap.** Explicit CLI `--policy <file>` / `--baseline <path>`
+  escape hatches (the profile covers the safe path); parallel snapshot extraction.
+
 ## Follow-ups (post-move-7)
 
 ### Follow-up 1 — owner residue → fail-fast (shipped `2179e37`)

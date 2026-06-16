@@ -236,7 +236,7 @@ single codec).
                 ▼
         ONE FACT BASE   schema facts + intent facts + edges
                 │        ( managedBy edges mark operationally-created objects )
-                │  policy filter:  { edgeTo: managedBy } → exclude   (Deliverable A)
+                │  resolveView:  managedBy provenance → project out   (Deliverable A)
                 ▼
         generic hash diff  → deltas  (schema + intent, one Delta type, O(changed))
                 ▼
@@ -324,22 +324,26 @@ of one fact base over a parallel relation.
 
 `capture` attaches a `managedBy(<ext>)` edge to every operationally-created
 object (partman children, pgmq `q_*`/`a_*` tables) — provenance as data (§3.1).
-`excludeManaged(factBase)` (`src/policy/managed.ts`) then removes every
-`managedBy`-tagged fact **and its descendant subtree** (the child table's
-columns/constraints), pruning edges with a removed endpoint — a fact-base
-transform mirroring `subtractBaseline`.
+`resolveView` (`src/policy/policy.ts`) then projects out every `managedBy`-tagged
+fact **and its descendant subtree** (the child table's columns/constraints),
+pruning edges with a removed endpoint — exactly as it already does for
+`memberOfExtension`. It is the **single projection point**: `managedBy` and
+`memberOfExtension` are two provenance cases of the one `excludeByProvenance`
+primitive (`src/policy/view.ts`; `excludeManaged` is the thin named wrapper). The
+projection mirrors `subtractBaseline`.
 
 **Exclusion is at the FACT level, not the delta level — and this matters for
 the proof.** A tempting alternative is a policy *filter rule* over deltas
-(`{ edgeTo: managedBy } → exclude`). It is wrong here: `provePlan` re-extracts
-the clone and diffs against `desired` with **no policy applied** (`prove.ts`),
-so a delta-only filter would make the proof **drift** — the clone keeps the
-children, `desired` lacks them. Removing the facts from the base on **both
-sides + the proof re-extract** keeps the invariant "the plan you prove == the
-plan you run == the data-preserving plan" (§6). (A second reason it cannot be a
-filter rule today: the policy DSL's `edgeTo` predicate matches the edge
-*target*, not the edge's `EdgeKind`, so `managedBy` is not expressible as a
-rule — confirming it belongs as a transform.)
+(`{ edgeTo: { edgeKind: "managedBy" } } → exclude`). It is wrong here: a
+delta-only filter would make the proof **drift** — the clone keeps the children,
+`desired` lacks them — so the invariant "the plan you prove == the plan you run
+== the data-preserving plan" (§6) only holds when the facts are removed on **both
+sides + the proof re-extract**. That is why managedBy exclusion is a built-in
+provenance projection in `resolveView` (universal, not Supabase-specific), not a
+policy rule. (The DSL *does* now support edge-kind predicates — `edgeTo: {
+edgeKind }` matches the edge's `EdgeKind`, used by policy scope rules — but the
+data-loss-class managed exclusion must apply to everyone, so it lives in the
+view projection, not behind a policy.)
 
 A **user-declared** `PARTITION OF` carries no `managedBy` edge, so its intended
 drop still fires — the #5491 false-suppression regression cannot recur by
@@ -347,17 +351,23 @@ construction (regression-tested in `src/policy/managed.test.ts`). The signal is
 sourced exactly where CLI-1591 requires it — the extension's own catalog, in
 the integration layer, never `src/core`.
 
-> **Implemented (Phase A).** `EdgeKind += "managedBy"` (`src/core/fact.ts`);
-> `excludeManaged` (`src/policy/managed.ts`); the `ExtensionHandler` interface +
-> `extractWithHandlers` (`src/policy/extensions/`); the **pg_partman** handler
-> reading `part_config` + a recursive `pg_inherits` walk
-> (`src/policy/extensions/pg-partman.ts`). Proven end-to-end against a real
-> pg_partman DB on the Supabase image
-> (`tests/extension-intent-partman.test.ts`): the raw diff drops the children;
-> the handler + `excludeManaged` stop it and preserve the parent. **Remaining
-> for production:** compose the handlers + `excludeManaged` into the CLI plan
-> path and the `provePlan` re-extract (so the live proof loop stays consistent),
-> then Phase B (intent replay).
+> **Implemented (Phase A — wired into the default path).**
+> `EdgeKind += "managedBy"` (`src/core/fact.ts`); the `ExtensionHandler` contract
+> (`src/extract/handler.ts`) whose `capture(ctx, current)` runs on the SAME
+> snapshot-bound transaction as core extraction — `extract(pool, { handlers })`
+> (`src/extract/extract.ts`) runs them before COMMIT, so handler `managedBy` edges
+> describe the same moment in DB time as the core facts. The **pg_partman**
+> handler reads `part_config` + a recursive `pg_inherits` walk
+> (`src/policy/extensions/pg-partman.ts`). `resolveView` projects out `managedBy`
+> (`src/policy/policy.ts`) so the managed view is correct at every entry point.
+> The **integration profile** (`src/integrations/`; `supabaseProfile`) composes
+> handlers + policy + baseline + capability and is wired into `plan`, `prove`,
+> `apply`, and the CLI (`--profile supabase`); `apply`'s fingerprint gate and
+> `provePlan`'s re-extract both re-extract handler-aware via the profile, so the
+> live proof loop stays consistent. Proven end-to-end against a real pg_partman
+> DB on the Supabase image (`tests/extension-intent-partman.test.ts`): the raw
+> diff drops the children; the profile path stops it and preserves the parent.
+> **Remaining for production:** Phase B (intent replay — `create_parent` etc.).
 
 ### 4.4 One intent reader, three doors (the hybrid sourcing, made uniform)
 
