@@ -1,0 +1,126 @@
+/**
+ * Planner phase 4 — ActionGraph (target-architecture §3.5–3.6).
+ *
+ * Turns the emitted action list into a deterministically ordered, compacted
+ * final list plus the aggregated safety report. Pure over its inputs (the
+ * emitted actions + producer/destroyer indexes + the two fact bases); the graph
+ * construction, topo sort, segment-boundary marking, and compaction building
+ * blocks live in ../internal.ts. Extracted so the ordering/compaction stage is a
+ * named phase boundary rather than a tail of `plan()`.
+ */
+import type { FactBase } from "../../core/fact.ts";
+import type { Action, SafetyReport } from "../plan.ts";
+import { topoSort } from "../graph.ts";
+import type { StableId } from "../../core/stable-id.ts";
+import {
+  actionTieKey,
+  buildActionGraph,
+  compactColumnFolds,
+  computeSafetyReport,
+  elideRedundantDrops,
+} from "../internal.ts";
+
+export interface FinalizeInput {
+  actions: Action[];
+  producerOf: ReadonlyMap<string, number>;
+  destroyerOf: ReadonlyMap<string, number>;
+  /** resolved source / desired views (NOT the projected target): graph build
+   *  order reads desired edges, teardown reads source edges. */
+  source: FactBase;
+  desired: FactBase;
+  renameActionIndices: ReadonlySet<number>;
+  /** per-action compaction metadata captured during emission (never persisted). */
+  foldHints: ReadonlyArray<{ foldInto: StableId; clause: string } | undefined>;
+  acceptsFolds: readonly boolean[];
+  /** §3.6 compaction; cosmetic-by-contract (proof unchanged). Default true. */
+  compact: boolean;
+}
+
+export interface FinalizeOutput {
+  actions: Action[];
+  safetyReport: SafetyReport;
+}
+
+/**
+ * Order, segment-mark, and compact the emitted actions; compute the safety
+ * report. Behavior-preserving extraction of `plan()`'s graph/order/compaction
+ * tail.
+ */
+export function finalizeActions(input: FinalizeInput): FinalizeOutput {
+  const {
+    actions,
+    producerOf,
+    destroyerOf,
+    source,
+    desired,
+    renameActionIndices,
+    foldHints,
+    acceptsFolds,
+    compact,
+  } = input;
+
+  // ── graph edges + deterministic order ─────────────────────────────────
+  const edges = buildActionGraph(
+    actions,
+    producerOf,
+    destroyerOf,
+    source,
+    desired,
+    renameActionIndices,
+  );
+
+  const order = topoSort(
+    actions.length,
+    edges,
+    (i) => actionTieKey(actions, i),
+    (i) => (actions[i] as Action).sql,
+  );
+
+  // ── commitBoundaryAfter segment boundary (§3.8) ───────────────────────
+  // Mark the FIRST graph successor of each commitBoundaryAfter action with
+  // newSegmentBefore. apply.ts already closes the segment unconditionally after
+  // a commitBoundaryAfter action (review #6), so this flag's load-bearing role
+  // now is COMPACTION PROTECTION — compaction refuses to fold a clause across a
+  // newSegmentBefore boundary. This loop is the sole producer of the flag.
+  const positionOf = Array.from({ length: actions.length }, () => 0);
+  order.forEach((actionIndex, position) => {
+    positionOf[actionIndex] = position;
+  });
+  const orderedActions = order.map((i) => actions[i] as Action);
+  for (let u = 0; u < actions.length; u++) {
+    if ((actions[u] as Action).transactionality !== "commitBoundaryAfter")
+      continue;
+    let firstConsumerPos = Number.POSITIVE_INFINITY;
+    for (const [a, b] of edges) {
+      if (a !== u) continue;
+      const pos = positionOf[b] as number;
+      if (pos < firstConsumerPos) firstConsumerPos = pos;
+    }
+    if (Number.isFinite(firstConsumerPos)) {
+      (orderedActions[firstConsumerPos] as Action).newSegmentBefore = true;
+    }
+  }
+
+  // ── compaction (§3.6) ─────────────────────────────────────────────────
+  // fold ADD COLUMN clauses into their bare CREATE TABLE (no edge may cross the
+  // merge), then drop a replace's redundant drop when the create reproduces the
+  // identical statement. Purely cosmetic — the proof is unchanged.
+  const finalActions = compact
+    ? elideRedundantDrops(
+        compactColumnFolds(
+          orderedActions,
+          order,
+          edges,
+          foldHints,
+          acceptsFolds,
+          positionOf,
+        ),
+        source,
+      )
+    : orderedActions;
+
+  return {
+    actions: finalActions,
+    safetyReport: computeSafetyReport(finalActions),
+  };
+}

@@ -15,14 +15,7 @@ import {
   type Policy,
 } from "../policy/policy.ts";
 import { canSetOwner, type ApplierCapability } from "../policy/capability.ts";
-import { topoSort } from "./graph.ts";
-import {
-  actionTieKey,
-  buildActionGraph,
-  compactColumnFolds,
-  computeSafetyReport,
-  elideRedundantDrops,
-} from "./internal.ts";
+import { finalizeActions } from "./phases/action-graph.ts";
 import { projectTarget } from "./project.ts";
 import { lockClassFor, type LockClass } from "./locks.ts";
 import { grantTarget, qid } from "./render.ts";
@@ -885,78 +878,22 @@ export function plan(
     }
   }
 
-  // ── graph edges + deterministic order ─────────────────────────────────
-  // edge build + requirement checks and the tie-break key are extracted to
-  // ./internal.ts (Item 7); they read only the emitted actions + the
-  // producer/destroyer indexes + the two fact bases.
-  const edges = buildActionGraph(
+  // ── phase 4: order, segment-mark, compact, and report ─────────────────
+  // Graph build + requirement checks, tie-break, segment-boundary marking, and
+  // the two cosmetic compaction passes are the ActionGraph phase
+  // (./phases/action-graph.ts → ./internal.ts building blocks). Reads only the
+  // emitted actions + producer/destroyer indexes + the two RESOLVED fact bases.
+  const { actions: finalActions, safetyReport } = finalizeActions({
     actions,
     producerOf,
     destroyerOf,
     source,
     desired,
     renameActionIndices,
-  );
-
-  const order = topoSort(
-    actions.length,
-    edges,
-    (i) => actionTieKey(actions, i),
-    (i) => (actions[i] as Action).sql,
-  );
-
-  // ── compaction/segment boundary for commitBoundaryAfter actions (§3.8) ──
-  // Mark the FIRST graph successor of each commitBoundaryAfter action with
-  // newSegmentBefore. apply.ts ALREADY closes the transactional segment
-  // unconditionally after a commitBoundaryAfter action (review #6), so this
-  // flag is redundant for APPLY correctness; its load-bearing role now is
-  // COMPACTION PROTECTION — internal.ts refuses to fold a clause into a CREATE
-  // across a newSegmentBefore boundary, so the consumer cannot be merged back
-  // before the commit. Do NOT remove: this loop is the sole producer of
-  // newSegmentBefore.
-  const positionOf = Array.from({ length: actions.length }, () => 0);
-  order.forEach((actionIndex, position) => {
-    positionOf[actionIndex] = position;
+    foldHints,
+    acceptsFolds,
+    compact: options?.compact !== false,
   });
-  const orderedActions = order.map((i) => actions[i] as Action);
-  for (let u = 0; u < actions.length; u++) {
-    if ((actions[u] as Action).transactionality !== "commitBoundaryAfter")
-      continue;
-    let firstConsumerPos = Number.POSITIVE_INFINITY;
-    for (const [a, b] of edges) {
-      if (a !== u) continue;
-      const pos = positionOf[b] as number;
-      if (pos < firstConsumerPos) firstConsumerPos = pos;
-    }
-    if (Number.isFinite(firstConsumerPos)) {
-      (orderedActions[firstConsumerPos] as Action).newSegmentBefore = true;
-    }
-  }
-
-  // ── compaction (§3.6, stage 5 deliverable 4) ──────────────────────────
-  // fold ADD COLUMN clauses into their bare CREATE TABLE. Safe iff every
-  // graph predecessor of the folded action sits at or before the target —
-  // i.e. no edge crosses the merge. Purely cosmetic: produces/consumes
-  // merge, so ordering semantics and the proof are unchanged.
-  // second cosmetic pass (§3.6): drop a replace's redundant drop when the
-  // create reproduces the identical statement (e.g. ACL's self-resetting
-  // grantActions). Runs on the already-folded list — disjoint from column folds.
-  const finalActions =
-    options?.compact !== false
-      ? elideRedundantDrops(
-          compactColumnFolds(
-            orderedActions,
-            order,
-            edges,
-            foldHints,
-            acceptsFolds,
-            positionOf,
-          ),
-          source,
-        )
-      : orderedActions;
-
-  const safetyReport = computeSafetyReport(finalActions);
 
   return {
     formatVersion: 1,
