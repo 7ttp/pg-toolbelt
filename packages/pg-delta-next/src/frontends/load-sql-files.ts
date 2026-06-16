@@ -31,6 +31,7 @@ import type { Pool, PoolClient } from "pg";
 import type { Diagnostic } from "../core/diagnostic.ts";
 import type { FactBase } from "../core/fact.ts";
 import { extract } from "../extract/extract.ts";
+import { notExtensionMember, USER_SCHEMA_FILTER } from "../extract/scope.ts";
 
 /** SQLSTATE 25001 ("active_sql_transaction") — raised when a statement that
  *  cannot run inside a transaction block (CREATE INDEX CONCURRENTLY, VACUUM, …)
@@ -468,26 +469,34 @@ export async function loadSqlFiles(
       );
     }
 
-    // DML rejection by observation: any user table with rows fails
+    // DML rejection by observation: any MANAGED USER table with rows fails.
+    // "User table" must mean the SAME thing the diff path manages, so reuse the
+    // extraction scope predicate (USER_SCHEMA_FILTER drops pg_catalog /
+    // information_schema / pg_toast / pg_temp) and exclude extension-owned
+    // relations (pg_depend deptype 'e'). Otherwise a declarative file that
+    // installs an extension whose CREATE EXTENSION seeds internal config rows —
+    // or a platform object — is wrongly rejected as if the user wrote DML (P2).
     const tables = await client.query(`
       SELECT n.nspname AS schema, c.relname AS name
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema')`);
+      WHERE c.relkind = 'r'
+        AND ${USER_SCHEMA_FILTER}
+        AND ${notExtensionMember("pg_class", "c.oid")}`);
     const populated: string[] = [];
     for (const row of tables.rows as { schema: string; name: string }[]) {
+      const qualified = `"${row.schema.replaceAll('"', '""')}"."${row.name.replaceAll('"', '""')}"`;
       const r = await client.query(
-        `SELECT EXISTS (SELECT 1 FROM "${row.schema.replaceAll('"', '""')}"."${row.name.replaceAll('"', '""')}" LIMIT 1) AS has`,
+        `SELECT EXISTS (SELECT 1 FROM ${qualified} LIMIT 1) AS has`,
       );
-      if ((r.rows[0] as { has: boolean }).has)
-        populated.push(`${row.schema}.${row.name}`);
+      if ((r.rows[0] as { has: boolean }).has) populated.push(qualified);
     }
     if (populated.length > 0) {
       throw new ShadowLoadError(
-        `declarative files must not contain data statements — rows found in: ${populated.join(", ")}`,
+        `declarative files must not contain data statements — rows found in managed user table(s): ${populated.join(", ")}`,
         populated.map((t) => ({
           code: "data_statement",
           severity: "error",
-          message: `table ${t} contains rows after loading`,
+          message: `managed user table ${t} contains rows after loading the declarative files`,
         })),
       );
     }
