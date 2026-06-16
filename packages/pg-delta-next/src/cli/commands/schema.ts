@@ -21,7 +21,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, dirname, resolve, sep } from "node:path";
-import { extract } from "../../extract/extract.ts";
 import { exportSqlFiles } from "../../frontends/export-sql-files.ts";
 import { loadSqlFiles } from "../../frontends/load-sql-files.ts";
 import { plan } from "../../plan/plan.ts";
@@ -30,6 +29,7 @@ import { encodeId, parseId, type StableId } from "../../core/stable-id.ts";
 import { exitIfBlocking, printDiagnostics } from "../diagnostics.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
+import { PROFILE_IDS, resolveCliProfile } from "../profile.ts";
 import type { RenameMode } from "../../plan/renames.ts";
 import type { SqlFile } from "../../frontends/load-sql-files.ts";
 
@@ -62,12 +62,14 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       source: { type: "value", required: true },
       "out-dir": { type: "value", required: true },
       layout: { type: "value" },
+      profile: { type: "value" },
       "strict-coverage": { type: "boolean" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next schema export --source <pg-url> --out-dir <dir> [--layout ordered] [--strict-coverage]\n`,
+        `${err.message}\nUsage: pg-delta-next schema export --source <pg-url> --out-dir <dir> ` +
+          `[--layout ordered] [--profile ${PROFILE_IDS}] [--strict-coverage]\n`,
       );
       process.exit(2);
     }
@@ -91,8 +93,11 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
 
   const src = makePool(sourceUrl);
   try {
+    // resolve the profile against the source pool so export sees the SAME
+    // handler-aware managed view as the profile-aware DB-to-DB path (review P1).
+    const ctx = await resolveCliProfile(src.pool, flags["profile"]);
     process.stderr.write("Extracting...\n");
-    const { factBase, diagnostics } = await extract(src.pool);
+    const { factBase, diagnostics } = await ctx.extract(src.pool);
     printDiagnostics(diagnostics);
     exitIfBlocking(diagnostics, {
       strictCoverage: flags["strict-coverage"],
@@ -131,13 +136,16 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       renames: { type: "value" },
       force: { type: "boolean" },
       "accept-rename": { type: "multi" },
+      profile: { type: "value" },
+      "restrict-to-applier": { type: "boolean" },
       "strict-coverage": { type: "boolean" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
         `${err.message}\nUsage: pg-delta-next schema apply --dir <dir> --shadow <pg-url> --target <pg-url> ` +
-          `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... [--strict-coverage]\n`,
+          `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... ` +
+          `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--strict-coverage]\n`,
       );
       process.exit(2);
     }
@@ -189,16 +197,28 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   const shadow = makePool(shadowUrl);
   const tgt = makePool(targetUrl);
   try {
+    // resolve the profile against the TARGET pool (the apply target): this
+    // composes handler-aware extraction, policy, baseline, and — with
+    // --restrict-to-applier — the applier capability, exactly as the DB-to-DB
+    // `plan` command does, so SQL-file apply == DB-to-DB plan (review P1).
+    const ctx = await resolveCliProfile(tgt.pool, flags["profile"], {
+      restrictToApplier: flags["restrict-to-applier"],
+    });
+
     process.stderr.write("Loading SQL files into shadow...\n");
     const files = collectSqlFiles(dir);
     process.stderr.write(`  ${files.length} file(s) found\n`);
-    const loadResult = await loadSqlFiles(files, shadow.pool);
+    // the shadow desired state must be projected with the SAME handlers as the
+    // target, so pass the profile extractor through to loadSqlFiles.
+    const loadResult = await loadSqlFiles(files, shadow.pool, {
+      extract: (p, o) => ctx.extract(p, o),
+    });
     process.stderr.write(
       `  Shadow loaded: ${loadResult.factBase.facts().length} facts (${loadResult.rounds} round(s))\n`,
     );
 
     process.stderr.write("Extracting target...\n");
-    const targetResult = await extract(tgt.pool);
+    const targetResult = await ctx.extract(tgt.pool);
     process.stderr.write(
       `  Target: ${targetResult.factBase.facts().length} facts\n`,
     );
@@ -212,8 +232,11 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       action: "apply",
     });
 
-    const planOptions =
-      acceptRenames.length > 0 ? { renames, acceptRenames } : { renames };
+    const planOptions = {
+      renames,
+      ...(acceptRenames.length > 0 ? { acceptRenames } : {}),
+      ...ctx.planOptions, // policy, capability, baseline (from the profile)
+    };
     const thePlan = plan(
       targetResult.factBase,
       loadResult.factBase,
@@ -253,6 +276,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     }
 
     const report = await apply(thePlan, tgt.pool, {
+      ...ctx.applyOptions, // baseline + handler-aware re-extract (from the profile)
       fingerprintGate: !force,
     });
 

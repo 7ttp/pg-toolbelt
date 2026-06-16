@@ -13,7 +13,7 @@ async function captureError(promise: Promise<unknown>): Promise<unknown> {
 }
 import { plan } from "../src/plan/plan.ts";
 import { provePlan } from "../src/proof/prove.ts";
-import { extract } from "../src/extract/extract.ts";
+import { extract, type ExtractOptions } from "../src/extract/extract.ts";
 import { createTestDb, isolatedClusterPair } from "./containers.ts";
 
 describe("loadSqlFiles (shadow frontend)", () => {
@@ -37,6 +37,40 @@ describe("loadSqlFiles (shadow frontend)", () => {
       expect(result.rounds).toBeGreaterThan(1);
       expect(
         result.factBase.has({ kind: "view", schema: "public", name: "v" }),
+      ).toBe(true);
+    } finally {
+      await shadow.drop();
+    }
+  }, 60_000);
+
+  test("honors a caller-supplied extractor (profile-aware shadow projection)", async () => {
+    // schema apply passes its profile's ctx.extract so the shadow desired state
+    // is projected with the same handlers as the target (review P1). Verify the
+    // option is actually used: a custom extractor is invoked with the shadow
+    // pool and the sqlFiles provenance, and its result is returned verbatim.
+    const shadow = await createTestDb("shadow");
+    try {
+      let calledWith: ExtractOptions | undefined;
+      const customExtract = (
+        pool: typeof shadow.pool,
+        options?: ExtractOptions,
+      ): ReturnType<typeof extract> => {
+        calledWith = options;
+        return extract(pool, options);
+      };
+      const result = await loadSqlFiles(
+        [
+          {
+            name: "01_table.sql",
+            sql: "CREATE TABLE public.t (id integer PRIMARY KEY);",
+          },
+        ],
+        shadow.pool,
+        { extract: customExtract },
+      );
+      expect(calledWith).toEqual({ source: "sqlFiles" });
+      expect(
+        result.factBase.has({ kind: "table", schema: "public", name: "t" }),
       ).toBe(true);
     } finally {
       await shadow.drop();

@@ -347,9 +347,9 @@ describe("CLI: schema profile-awareness", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toContain("Exported");
       const { existsSync } = await import("node:fs");
-      expect(
-        existsSync(join(outDir, "schemas/clitest/tables/items.sql")),
-      ).toBe(true);
+      expect(existsSync(join(outDir, "schemas/clitest/tables/items.sql"))).toBe(
+        true,
+      );
     } finally {
       await source.drop();
     }

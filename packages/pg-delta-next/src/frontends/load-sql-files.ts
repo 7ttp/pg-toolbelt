@@ -30,7 +30,11 @@
 import type { Pool, PoolClient } from "pg";
 import type { Diagnostic } from "../core/diagnostic.ts";
 import type { FactBase } from "../core/fact.ts";
-import { extract } from "../extract/extract.ts";
+import {
+  extract,
+  type ExtractOptions,
+  type ExtractResult,
+} from "../extract/extract.ts";
 import { notExtensionMember, USER_SCHEMA_FILTER } from "../extract/scope.ts";
 
 /** SQLSTATE 25001 ("active_sql_transaction") — raised when a statement that
@@ -246,10 +250,16 @@ export async function loadSqlFiles(
   options: {
     maxRounds?: number;
     mode?: "databaseScratch" | "isolatedCluster";
+    /** Extractor for the loaded shadow state. Defaults to the raw core
+     *  `extract`; a profile-aware caller passes its `ctx.extract` so the shadow
+     *  desired state is projected with the SAME handlers as the target (review
+     *  P1 — SQL-file workflows must match the profile-aware DB-to-DB path). */
+    extract?: (pool: Pool, options?: ExtractOptions) => Promise<ExtractResult>;
   } = {},
 ): Promise<LoadResult> {
   const maxRounds = options.maxRounds ?? 25;
   const mode = options.mode ?? "databaseScratch";
+  const extractShadow = options.extract ?? extract;
 
   // the shadow must be empty — verify by observation
   const preexisting = await shadow.query(`
@@ -508,8 +518,10 @@ export async function loadSqlFiles(
     client.release();
   }
 
-  // provenance tag: mark the fact base as originating from SQL files
-  const result = await extract(shadow, { source: "sqlFiles" });
+  // provenance tag: mark the fact base as originating from SQL files. The
+  // extractor is profile-aware when the caller supplied one (handler-aware
+  // projection), else the raw core extractor.
+  const result = await extractShadow(shadow, { source: "sqlFiles" });
   return {
     factBase: result.factBase,
     pgVersion: result.pgVersion,
