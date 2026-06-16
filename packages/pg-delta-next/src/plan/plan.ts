@@ -16,6 +16,8 @@ import {
 } from "../policy/policy.ts";
 import { canSetOwner, type ApplierCapability } from "../policy/capability.ts";
 import { finalizeActions } from "./phases/action-graph.ts";
+import { expandReplacements } from "./phases/replacement-expansion.ts";
+import { ruleFlag } from "./rule-flags.ts";
 import { projectTarget } from "./project.ts";
 import { lockClassFor, type LockClass } from "./locks.ts";
 import { grantTarget, qid } from "./render.ts";
@@ -35,7 +37,6 @@ import {
   KNOWN_PARAMS,
   rulesFor,
   type ActionSpec,
-  type KindRules,
   type PlanParams,
 } from "./rules.ts";
 
@@ -149,24 +150,6 @@ export interface PlanOptions {
    *  same managed view without the operator re-specifying `--profile`. */
   profile?: { id: string };
 }
-
-// Per-kind graph/suppression policy is DECLARED IN THE RULE TABLE
-// (guardrail 3). These accessors read those flags; the planner body holds
-// no kind-name lists. `rulesFor` throws for unknown kinds, so guard it.
-function ruleFlag<K extends keyof KindRules>(
-  kind: string,
-  flag: K,
-): KindRules[K] | undefined {
-  try {
-    return rulesFor(kind)[flag];
-  } catch {
-    return undefined;
-  }
-}
-const cascadesToChildren = (kind: string): boolean =>
-  ruleFlag(kind, "cascadesToChildren") === true;
-const isRebuildable = (kind: string): boolean =>
-  ruleFlag(kind, "rebuildable") === true;
 
 export function plan(
   source: FactBase,
@@ -314,136 +297,16 @@ export function plan(
     });
   }
 
-  // ── classify set-deltas: in-place alter vs replace ────────────────────
-  const replaceIds = new Set<string>();
-  // alters that invalidate dependents (e.g. an enum value-set replacement,
-  // or an ALTER COLUMN TYPE that views/policies reference) seed the forced-
-  // rebuild pass without replacing the fact itself. The value is the set of
-  // dependent kinds to rebuild (null = all rebuildable kinds).
-  const rebuildSeeds = new Map<string, ReadonlySet<string> | null>();
-  for (const [key, sets] of setsByFact) {
-    const kind = (desired.get(sets[0]!.id) as Fact).id.kind;
-    const rules = rulesFor(kind);
-    for (const s of sets) {
-      const attrRule = rules.attributes[s.attr];
-      if (attrRule === undefined) {
-        throw new Error(
-          `rule table: kind '${kind}' has no rule for attribute '${s.attr}' (${key}) — extend the rule vocabulary (guardrail 3)`,
-        );
-      }
-      if (attrRule === "replace") {
-        replaceIds.add(key);
-        continue;
-      }
-      const rebuild = attrRule.rebuildsDependents?.(s.from, s.to);
-      if (rebuild === true) rebuildSeeds.set(key, null);
-      else if (Array.isArray(rebuild)) rebuildSeeds.set(key, new Set(rebuild));
-    }
-  }
-
-  // ── forced dependent rebuild (the clean expand-replace, §3.4) ─────────
-  // A surviving dependent of something this plan destroys must be dropped
-  // and recreated from the desired state — recursively. Which kinds are
-  // rebuildable is declared per-kind in the rule table (`rebuildable`).
-  {
-    // `fullDestroy` ids rebuild EVERY rebuildable dependent; `rebuildSeeds`
-    // (an in-place alter that invalidates only some dependent kinds) rebuild
-    // only their declared kinds. Once a dependent is rebuilt it joins
-    // `fullDestroy`, so its own subtree rebuilds completely.
-    const fullDestroy = new Set([...removed.keys(), ...replaceIds]);
-    const targets = new Set([...fullDestroy, ...rebuildSeeds.keys()]);
-    // Reverse-dependency reachability from the initial targets, instead of
-    // rescanning every source edge each fixpoint round (O(reachable) vs
-    // O(edges × rounds), #2). Same checks/precedence as the fixpoint: a
-    // dependent of a destroyed/replaced fact (or a kind-restricted seed) that is
-    // rebuildable and survives in `desired` is replaced, and itself becomes a
-    // full-destroy target so its own subtree rebuilds.
-    const worklist = [...targets];
-    while (worklist.length > 0) {
-      const toKey = worklist.pop() as string;
-      for (const edge of source.incomingEdgesByEncoded(toKey)) {
-        const fromKey = encodeId(edge.from);
-        if (targets.has(fromKey)) continue;
-        const dependent = source.get(edge.from);
-        if (!dependent || !desired.has(edge.from)) continue;
-        if (!isRebuildable(dependent.id.kind)) continue;
-        // reached only via a kind-restricted seed: honor the allowed kinds
-        if (!fullDestroy.has(toKey)) {
-          const allowed = rebuildSeeds.get(toKey);
-          if (allowed && !allowed.has(dependent.id.kind)) continue;
-        }
-        replaceIds.add(fromKey);
-        fullDestroy.add(fromKey);
-        targets.add(fromKey);
-        worklist.push(fromKey);
-      }
-    }
-    // descendants of replaced facts are handled by the ancestor's subtree
-    // recreate — keep only the topmost replaced facts
-    // deleting the entry under iteration is safe for a JS Set
-    for (const key of replaceIds) {
-      const fact = source.getByEncoded(key);
-      let ancestor = fact?.parent;
-      while (ancestor !== undefined) {
-        if (replaceIds.has(encodeId(ancestor))) {
-          replaceIds.delete(key);
-          break;
-        }
-        ancestor = source.get(ancestor)?.parent;
-      }
-    }
-  }
-
-  // ── suppression: child removals that cascade with an ancestor's drop ──
-  // dropRootOf(id) = nearest removed ancestor whose drop action will exist.
-  // FK constraint drops are NEVER suppressed: explicit DROP CONSTRAINT
-  // before the table drops makes mutual-FK teardown cycles unconstructible
-  // (decomposition over repair, §3.5).
-  const isRemovedId = (id: StableId): boolean => {
-    const key = encodeId(id);
-    return removed.has(key) || replaceIds.has(key);
-  };
-  const dropRootOf = new Map<string, string>();
-  const findDropRoot = (fact: Fact): string => {
-    const key = encodeId(fact.id);
-    const cached = dropRootOf.get(key);
-    if (cached) return cached;
-    let root = key;
-    const rules = rulesFor(fact.id.kind);
-    const suppressible = rules.suppressible?.(fact) ?? true;
-    const parent = fact.parent;
-    if (parent !== undefined && suppressible) {
-      const parentRemoved = isRemovedId(parent);
-      // a metadata satellite folds into ANY removed parent; otherwise the
-      // parent kind must be one whose DROP cascades to children
-      const cascades =
-        rules.metadata === true || cascadesToChildren(parent.kind);
-      if (parentRemoved && cascades) {
-        root = findDropRoot(
-          removed.get(encodeId(parent)) ?? (source.get(parent) as Fact),
-        );
-      }
-    }
-    dropRootOf.set(key, root);
-    return root;
-  };
-  for (const fact of removed.values()) findDropRoot(fact);
-
-  // a fact whose drop folds into a NON-parent ancestor (an OWNED BY
-  // sequence into its owning column/table) — declared per-kind via
-  // dropRootRedirect, resolved here
-  for (const fact of removed.values()) {
-    const redirect = rulesFor(fact.id.kind).dropRootRedirect?.(
-      fact,
-      isRemovedId,
-    );
-    if (redirect === undefined) continue;
-    const redirectKey = encodeId(redirect);
-    dropRootOf.set(
-      encodeId(fact.id),
-      dropRootOf.get(redirectKey) ?? redirectKey,
-    );
-  }
+  // ── phase 2: replacement expansion + drop-root suppression ────────────
+  // Classify set-deltas (alter vs replace), expand the forced dependent
+  // rebuild, and compute drop-root suppression/redirect (./phases/
+  // replacement-expansion.ts). Produces the replaceIds set + dropRootOf map.
+  const { replaceIds, dropRootOf } = expandReplacements({
+    removed,
+    setsByFact,
+    source,
+    desired,
+  });
 
   // ── emit actions ──────────────────────────────────────────────────────
   const actions: Action[] = [];
