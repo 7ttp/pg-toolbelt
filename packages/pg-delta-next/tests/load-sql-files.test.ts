@@ -43,6 +43,38 @@ describe("loadSqlFiles (shadow frontend)", () => {
     }
   }, 60_000);
 
+  test("a deep dependency chain converges (rounds scale with depth, not the old 25 cap)", async () => {
+    // A linear chain of 30 views, each selecting from the next, with the base
+    // table last — and files named so lexicographic order is EXACTLY reverse
+    // dependency order. Round k resolves exactly one file, so it needs ~30
+    // rounds. The old fixed maxRounds=25 fails this with "did not converge"
+    // even though it was making steady progress; the cap must scale with the
+    // file count so dependency depth is never an artificial ceiling.
+    const DEPTH = 30;
+    const shadow = await createTestDb("shadow");
+    try {
+      const files = [];
+      for (let k = 0; k < DEPTH - 1; k++) {
+        files.push({
+          name: `${String(k).padStart(2, "0")}_v${k}.sql`,
+          sql: `CREATE VIEW public.v${k} AS SELECT * FROM public.v${k + 1};`,
+        });
+      }
+      files.push({
+        name: `${String(DEPTH - 1).padStart(2, "0")}_v${DEPTH - 1}.sql`,
+        sql: `CREATE TABLE public.v${DEPTH - 1} (id integer);`,
+      });
+
+      const result = await loadSqlFiles(files, shadow.pool);
+      expect(result.rounds).toBeGreaterThanOrEqual(DEPTH);
+      expect(
+        result.factBase.has({ kind: "view", schema: "public", name: "v0" }),
+      ).toBe(true);
+    } finally {
+      await shadow.drop();
+    }
+  }, 120_000);
+
   test("honors a caller-supplied extractor (profile-aware shadow projection)", async () => {
     // schema apply passes its profile's ctx.extract so the shadow desired state
     // is projected with the same handlers as the target (review P1). Verify the
