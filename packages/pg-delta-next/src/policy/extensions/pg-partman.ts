@@ -15,10 +15,13 @@
  * (trigger-based) partitioning both use `pg_inherits`, so the recursive walk
  * covers every level, including `*_default` and premade children.
  */
-import type { Pool } from "pg";
 import type { DependencyEdge, FactBase } from "../../core/fact.ts";
+import type {
+  CaptureResult,
+  ExtensionHandler,
+  HandlerContext,
+} from "../../extract/handler.ts";
 import type { StableId } from "../../core/stable-id.ts";
-import type { CaptureResult, ExtensionHandler } from "./handler.ts";
 
 const PG_PARTMAN: StableId = { kind: "extension", name: "pg_partman" };
 
@@ -28,26 +31,26 @@ function quoteIdent(name: string): string {
 }
 
 /** Resolve the schema pg_partman is installed into, or null if absent. */
-async function detect(pool: Pool): Promise<string | null> {
-  const { rows } = await pool.query<{ schema: string }>(
+async function detect(ctx: HandlerContext): Promise<string | null> {
+  const rows = await ctx.query(
     `SELECT n.nspname AS schema
        FROM pg_extension e
        JOIN pg_namespace n ON n.oid = e.extnamespace
       WHERE e.extname = 'pg_partman'`,
   );
-  return rows[0]?.schema ?? null;
+  return (rows[0]?.["schema"] as string | undefined) ?? null;
 }
 
 export const pgPartmanHandler: ExtensionHandler = {
   extension: "pg_partman",
 
-  async capture(pool: Pool, current: FactBase): Promise<CaptureResult> {
-    const schema = await detect(pool);
+  async capture(ctx: HandlerContext, current: FactBase): Promise<CaptureResult> {
+    const schema = await detect(ctx);
     if (schema === null) return { facts: [], edges: [] };
 
     // Every table inheriting (directly or transitively) from a parent
     // registered in part_config is partman-managed.
-    const { rows } = await pool.query<{ schema: string; name: string }>(
+    const rows = await ctx.query(
       `WITH RECURSIVE managed_parents AS (
          SELECT to_regclass(parent_table)::oid AS oid
            FROM ${quoteIdent(schema)}.part_config
@@ -72,8 +75,8 @@ export const pgPartmanHandler: ExtensionHandler = {
     for (const row of rows) {
       const child: StableId = {
         kind: "table",
-        schema: row.schema,
-        name: row.name,
+        schema: String(row["schema"]),
+        name: String(row["name"]),
       };
       // only tag children that are actually facts (avoid dangling edges)
       if (!current.has(child)) continue;

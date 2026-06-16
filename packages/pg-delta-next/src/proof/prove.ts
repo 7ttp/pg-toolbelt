@@ -79,10 +79,12 @@ export interface ProveOptions {
    *  populated-table migration hazards, which is a separate audit. */
   autoSeed?: boolean;
   /** how to re-extract the clone after applying. Defaults to the core
-   *  `extract`. An integration with extension handlers MUST pass its
-   *  managed-aware extractor (e.g. `extractManaged`) so the proof compares the
-   *  SAME view of state it diffed — otherwise operationally-managed objects
-   *  (pg_partman children, …) reappear as drift (docs/architecture/extension-intent.md §6). */
+   *  `extract`. An integration with extension handlers MUST pass a handler-aware
+   *  re-extractor — `extract(pool, { handlers })`, which the resolved profile
+   *  supplies as `proveOptions.reextract` — so the proof emits the same
+   *  `managedBy` edges and `resolveView` projects out the same managed view it
+   *  diffed; otherwise operationally-managed objects (pg_partman children, …)
+   *  reappear as drift (docs/architecture/extension-intent.md §6). */
   reextract?: (pool: Pool) => Promise<{ factBase: FactBase }>;
   /** the policy the plan was produced with. The proof must compare the SAME
    *  managed view it diffed, so `resolveView(.., policy)` is applied to both the

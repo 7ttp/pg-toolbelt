@@ -30,7 +30,14 @@
  */
 import type { Pool, PoolClient } from "pg";
 import type { Diagnostic } from "../core/diagnostic.ts";
-import { buildFactBase, type FactBase, type FactSource } from "../core/fact.ts";
+import {
+  buildFactBase,
+  type DependencyEdge,
+  type Fact,
+  type FactBase,
+  type FactSource,
+} from "../core/fact.ts";
+import type { ExtensionHandler, HandlerContext } from "./handler.ts";
 import {
   extractDependencyEdges,
   extractInheritanceEdges,
@@ -70,9 +77,22 @@ export interface ExtractResult {
   diagnostics: Diagnostic[];
 }
 
+export interface ExtractOptions {
+  source?: FactSource;
+  statementTimeoutMs?: number;
+  /**
+   * Extension handlers, run on the SAME snapshot-bound transaction as core
+   * extraction (before COMMIT), so handler-produced `managedBy` edges describe
+   * the same moment in database time as the core facts. Default: none (bare
+   * core extraction; the corpus path). An integration supplies its profile's
+   * handlers here so the managed view is coherent.
+   */
+  handlers?: readonly ExtensionHandler[];
+}
+
 export async function extract(
   pool: Pool,
-  options: { source?: FactSource; statementTimeoutMs?: number } = {},
+  options: ExtractOptions = {},
 ): Promise<ExtractResult> {
   const client = await pool.connect();
   try {
@@ -90,6 +110,7 @@ export async function extract(
       client,
       options.source ?? "liveDb",
       options.statementTimeoutMs,
+      options.handlers ?? [],
     );
     await client.query("COMMIT");
     return result;
@@ -104,7 +125,8 @@ export async function extract(
 async function extractOnClient(
   client: PoolClient,
   source: FactSource,
-  statementTimeoutMs?: number,
+  statementTimeoutMs: number | undefined,
+  handlers: readonly ExtensionHandler[],
 ): Promise<ExtractResult> {
   const ctx = createExtractContext(client, statementTimeoutMs);
 
@@ -143,7 +165,33 @@ async function extractOnClient(
   // building — a satellite with a missing target would otherwise throw
   const pruned = pruneOrphanedSatellites(ctx.facts);
   ctx.diagnostics.push(...pruned.diagnostics);
-  const factBase = buildFactBase(pruned.facts, ctx.edges, source);
+  let factBase = buildFactBase(pruned.facts, ctx.edges, source);
+
+  // Extension handlers run HERE — on the same snapshot-bound client, inside the
+  // still-open REPEATABLE READ transaction (extract() COMMITs only after this
+  // returns). Handler queries therefore see the exact snapshot core extraction
+  // saw, so the `managedBy` edges they emit line up with the core fact base
+  // even under concurrent DDL / partition creation. The handler context exposes
+  // only the timeout-aware query runner, not the catalog push helpers — handlers
+  // contribute their own facts/edges, they do not mutate the core buffers.
+  if (handlers.length > 0) {
+    const handlerCtx: HandlerContext = { query: ctx.q };
+    const extraFacts: Fact[] = [];
+    const extraEdges: DependencyEdge[] = [];
+    for (const handler of handlers) {
+      const captured = await handler.capture(handlerCtx, factBase);
+      extraFacts.push(...captured.facts);
+      extraEdges.push(...captured.edges);
+    }
+    if (extraFacts.length > 0 || extraEdges.length > 0) {
+      factBase = buildFactBase(
+        [...factBase.facts(), ...extraFacts],
+        [...factBase.edges, ...extraEdges],
+        source,
+      );
+    }
+  }
+
   // dangling edges (e.g. references to unextracted kinds) become diagnostics
   ctx.diagnostics.push(...factBase.diagnostics);
   // catalog completeness: user objects in kinds we don't model are reported,
