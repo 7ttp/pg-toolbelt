@@ -315,6 +315,7 @@ describe("role-name-bearing kind registry (review P3 guard)", () => {
     "rule",
     "policy",
     "default",
+    "function",
     "procedure",
     "aggregate",
     "typeAttribute",

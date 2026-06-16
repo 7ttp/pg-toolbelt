@@ -1,41 +1,48 @@
 /** Rule definitions for routines: functions / procedures and aggregates. */
+import type { Fact } from "../../core/fact.ts";
 import { lit, qid, rel, routineSig } from "../render.ts";
 import type { KindRules } from "../rules.ts";
 import { aggSig, p, str } from "./helpers.ts";
 
-export const routineRules: Record<string, KindRules> = {
-  procedure: {
-    weight: 8,
-    cascadesToChildren: true,
-    rebuildable: true,
-    defaclObjtype: "f",
-    rename: (fact, to) => ({
-      sql: `ALTER ROUTINE ${routineSig(fact.id as { schema: string; name: string; args: string[] })} RENAME TO ${qid((to as { name: string }).name)}`,
-    }),
-    create: (fact) => [
-      {
-        sql: str(p(fact, "def")),
-      },
-    ],
-    drop: (fact) => {
-      const id = fact.id as { schema: string; name: string; args: string[] };
-      const keyword =
-        str(p(fact, "routineKind")) === "p" ? "PROCEDURE" : "FUNCTION";
-      return { sql: `DROP ${keyword} ${routineSig(id)}` };
+/** FUNCTION / PROCEDURE keyword from the routine's own id kind — never a
+ *  payload field (the kind is part of the address, P0). */
+const routineKeyword = (fact: Fact): "FUNCTION" | "PROCEDURE" =>
+  fact.id.kind === "procedure" ? "PROCEDURE" : "FUNCTION";
+
+// Functions and procedures share one rule implementation: identical
+// create/drop/rename/owner shapes, differing only by the keyword derived from
+// the id kind. Registered under both `function` and `procedure` keys below.
+const routineRule: KindRules = {
+  weight: 8,
+  cascadesToChildren: true,
+  rebuildable: true,
+  defaclObjtype: "f",
+  rename: (fact, to) => ({
+    sql: `ALTER ROUTINE ${routineSig(fact.id as { schema: string; name: string; args: string[] })} RENAME TO ${qid((to as { name: string }).name)}`,
+  }),
+  create: (fact) => [
+    {
+      sql: str(p(fact, "def")),
     },
-    ownerAlterPrefix: (fact) => {
-      const id = fact.id as { schema: string; name: string; args: string[] };
-      const keyword =
-        str(p(fact, "routineKind")) === "p" ? "PROCEDURE" : "FUNCTION";
-      return `ALTER ${keyword} ${routineSig(id)}`;
-    },
-    attributes: {
-      // return-type/strictness changes refuse CREATE OR REPLACE; replace +
-      // forced dependent rebuild is always safe
-      def: "replace",
-      routineKind: "replace",
-    },
+  ],
+  drop: (fact) => {
+    const id = fact.id as { schema: string; name: string; args: string[] };
+    return { sql: `DROP ${routineKeyword(fact)} ${routineSig(id)}` };
   },
+  ownerAlterPrefix: (fact) => {
+    const id = fact.id as { schema: string; name: string; args: string[] };
+    return `ALTER ${routineKeyword(fact)} ${routineSig(id)}`;
+  },
+  attributes: {
+    // return-type/strictness changes refuse CREATE OR REPLACE; replace +
+    // forced dependent rebuild is always safe
+    def: "replace",
+  },
+};
+
+export const routineRules: Record<string, KindRules> = {
+  function: routineRule,
+  procedure: routineRule,
 
   aggregate: {
     weight: 9,

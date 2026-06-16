@@ -21,7 +21,9 @@ export const KIND_COVERAGE: Record<string, boolean | string> = {
   sequence: true,
   view: true,
   materializedView: true,
-  procedure: true,
+  function: true,
+  procedure:
+    "covered by corpus procedure-operations scenarios; the soak generator emits only CREATE FUNCTION",
   aggregate: true,
   trigger: true,
   policy: true,

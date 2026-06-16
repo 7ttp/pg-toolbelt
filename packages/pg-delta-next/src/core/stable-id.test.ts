@@ -58,6 +58,14 @@ describe("encodeId", () => {
   test("routines carry signatures", () => {
     expect(
       encodeId({
+        kind: "function",
+        schema: "public",
+        name: "add",
+        args: ["integer", "integer"],
+      }),
+    ).toBe("function:public.add(integer,integer)");
+    expect(
+      encodeId({
         kind: "procedure",
         schema: "public",
         name: "add",
@@ -117,6 +125,7 @@ describe("parseId round-trips", () => {
     { kind: "table", schema: "Schema With Space", name: 'crazy."name"' },
     { kind: "column", schema: "s", table: "t", name: "c" },
     { kind: "column", schema: "a.b", table: "c:d", name: "e(f)" },
+    { kind: "function", schema: "public", name: "fn", args: [] },
     { kind: "procedure", schema: "public", name: "fn", args: [] },
     {
       kind: "procedure",

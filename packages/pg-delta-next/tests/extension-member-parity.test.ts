@@ -38,7 +38,8 @@ const FLIPPED_KINDS: ReadonlySet<string> = new Set<string>([
   "sequence",
   "view",
   "materializedView",
-  "procedure", // functions + procedures (routines family)
+  "function", // routines family: functions ('f')
+  "procedure", // routines family: procedures ('p')
   "aggregate",
   "domain",
   "type", // enum, composite, range
@@ -80,11 +81,12 @@ async function catalogMembers(
         AND c.relkind IN ('r','p','v','m','S')
         AND e.extname <> 'plpgsql' AND ${userNs("n.nspname")}
       UNION ALL
-      -- routines (functions/procedures → 'procedure', aggregates → 'aggregate'),
-      -- minus those that are an internal dependency (type I/O etc.): the
-      -- extractor excludes deptype 'i', so they are not standalone facts
+      -- routines (functions → 'function', procedures → 'procedure',
+      -- aggregates → 'aggregate'), minus those that are an internal dependency
+      -- (type I/O etc.): the extractor excludes deptype 'i', so they are not
+      -- standalone facts
       SELECT json_build_object(
-               'kind', CASE p.prokind WHEN 'a' THEN 'aggregate' ELSE 'procedure' END,
+               'kind', CASE p.prokind WHEN 'a' THEN 'aggregate' WHEN 'p' THEN 'procedure' ELSE 'function' END,
                'schema', n.nspname, 'name', p.proname,
                'args', ARRAY(SELECT format_type(t.t, NULL)
                              FROM unnest(p.proargtypes) WITH ORDINALITY AS t(t, ord)
@@ -168,6 +170,7 @@ function identToStableId(o: Record<string, unknown>): StableId {
         schema: String(o["schema"]),
         name: String(o["name"]),
       };
+    case "function":
     case "procedure":
     case "aggregate":
       return {

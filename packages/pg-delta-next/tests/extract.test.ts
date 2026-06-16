@@ -179,7 +179,7 @@ describe("extract: fixture ring", () => {
     const view = fb().get({ kind: "view", schema: "app", name: "user_emails" });
     expect(view?.payload["def"] as string).toContain("FROM app.users");
     const fn = fb().get({
-      kind: "procedure",
+      kind: "function",
       schema: "app",
       name: "add",
       args: ["integer", "integer"],

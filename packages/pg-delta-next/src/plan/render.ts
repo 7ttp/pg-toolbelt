@@ -44,8 +44,10 @@ export function commentTarget(id: StableId): string {
       return `TRIGGER ${qid(id.name)} ON ${rel(id.schema, id.table)}`;
     case "policy":
       return `POLICY ${qid(id.name)} ON ${rel(id.schema, id.table)}`;
-    case "procedure":
+    case "function":
       return `FUNCTION ${routineSig(id)}`;
+    case "procedure":
+      return `PROCEDURE ${routineSig(id)}`;
     case "aggregate":
       return `AGGREGATE ${routineSig(id)}`;
     case "extension":
@@ -89,6 +91,10 @@ export function grantTarget(id: StableId): string {
     case "schema":
       return `SCHEMA ${qid(id.name)}`;
     case "procedure":
+      return `PROCEDURE ${routineSig(id)}`;
+    case "function":
+    // aggregates are granted via the FUNCTION form (there is no
+    // GRANT ... ON AGGREGATE in PostgreSQL's privilege grammar).
     case "aggregate":
       return `FUNCTION ${routineSig(id)}`;
     case "domain":

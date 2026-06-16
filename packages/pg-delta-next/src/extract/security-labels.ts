@@ -79,9 +79,15 @@ export async function extractSecurityLabels(
       JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE ${USER_SCHEMA_FILTER}
       ORDER BY 1, 3, 4`)) {
+      const prokind = String(row["prokind"]);
       pushSeclabel(
         {
-          kind: String(row["prokind"]) === "a" ? "aggregate" : "procedure",
+          kind:
+            prokind === "a"
+              ? "aggregate"
+              : prokind === "p"
+                ? "procedure"
+                : "function",
           schema: String(row["schema"]),
           name: String(row["name"]),
           args: (row["args"] as string[]).map(String),

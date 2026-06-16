@@ -1096,7 +1096,7 @@ describe("factMatches — edgeTo predicate", () => {
 
   test("matches by schema of the target fact", () => {
     const procId: StableId = {
-      kind: "procedure",
+      kind: "function",
       schema: "public",
       name: "my_func",
       args: [],
@@ -1135,18 +1135,18 @@ describe("factMatches — edgeTo predicate", () => {
       [schemaAuthFact, schemaPubFact, tableAuthFact, procFact, trigFact],
       [edge],
     );
-    // trigger has an edge to a procedure in "public" (non-system schema)
+    // trigger has an edge to a function in "public" (non-system schema)
     expect(
       factMatches(
-        { edgeTo: { kind: "procedure", schema: "public" } },
+        { edgeTo: { kind: "function", schema: "public" } },
         trigFact,
         fb,
       ),
     ).toBe(true);
-    // does NOT match when we look for edge to procedure in "auth"
+    // does NOT match when we look for edge to function in "auth"
     expect(
       factMatches(
-        { edgeTo: { kind: "procedure", schema: "auth" } },
+        { edgeTo: { kind: "function", schema: "auth" } },
         trigFact,
         fb,
       ),
@@ -1155,7 +1155,7 @@ describe("factMatches — edgeTo predicate", () => {
 
   test("edgeTo with only schema constraint (no kind filter)", () => {
     const procId: StableId = {
-      kind: "procedure",
+      kind: "function",
       schema: "public",
       name: "fn",
       args: [],

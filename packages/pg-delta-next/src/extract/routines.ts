@@ -32,8 +32,11 @@ export async function extractRoutines(ctx: ExtractContext): Promise<void> {
           AND idep.deptype = 'i')
     ORDER BY n.nspname, p.proname`)) {
     const args = (row["identity_args"] as string[]).map(String);
+    // prokind distinguishes functions ('f') from procedures ('p'); the kind
+    // lives in the id (not the payload) so satellite renderers address the
+    // routine with the correct DDL keyword (FUNCTION vs PROCEDURE).
     const id: StableId = {
-      kind: "procedure",
+      kind: String(row["prokind"]) === "p" ? "procedure" : "function",
       schema: String(row["schema"]),
       name: String(row["name"]),
       args,
@@ -44,7 +47,6 @@ export async function extractRoutines(ctx: ExtractContext): Promise<void> {
         parent: schemaId(row["schema"]),
         payload: {
           def: String(row["def"]),
-          routineKind: String(row["prokind"]),
         },
       },
       row,

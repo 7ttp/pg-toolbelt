@@ -45,8 +45,11 @@ const SUBENTITY_KINDS = [
 ] as const;
 export type SubEntityKind = (typeof SUBENTITY_KINDS)[number];
 
-/** Kinds identified by (schema, name, argument type list). */
-const ROUTINE_KINDS = ["procedure", "aggregate"] as const;
+/** Kinds identified by (schema, name, argument type list). PostgreSQL gives
+ *  functions and procedures DIFFERENT DDL address syntax (COMMENT/GRANT/SECURITY
+ *  LABEL ON FUNCTION vs ON PROCEDURE), so they are distinct id kinds — the
+ *  renderer must never infer the address grammar from a payload field. */
+const ROUTINE_KINDS = ["function", "procedure", "aggregate"] as const;
 export type RoutineKind = (typeof ROUTINE_KINDS)[number];
 
 export type StableId =

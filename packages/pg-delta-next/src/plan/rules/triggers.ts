@@ -49,8 +49,10 @@ export const triggerRules: Record<string, KindRules> = {
     weight: 17,
     create: (fact) => {
       const name = qid((fact.id as { name: string }).name);
+      // an event-trigger function is always a real function (prokind 'f',
+      // returns event_trigger), never a procedure.
       const fnId: StableId = {
-        kind: "procedure",
+        kind: "function",
         schema: str(p(fact, "functionSchema")),
         name: str(p(fact, "functionName")),
         args: [],

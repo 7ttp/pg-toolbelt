@@ -102,7 +102,7 @@ export async function extractDependencyEdges(
     ),
     proc AS (
       SELECT pp.oid, json_build_object(
-               'kind', CASE pp.prokind WHEN 'a' THEN 'aggregate' ELSE 'procedure' END,
+               'kind', CASE pp.prokind WHEN 'a' THEN 'aggregate' WHEN 'p' THEN 'procedure' ELSE 'function' END,
                'schema', pn.nspname, 'name', pp.proname,
                'args', ARRAY(SELECT format_type(t.t, NULL)
                              FROM unnest(pp.proargtypes) WITH ORDINALITY AS t(t, ord)
@@ -306,6 +306,7 @@ export async function extractDependencyEdges(
           table: o["table"] as string,
           name: o["name"] as string,
         };
+      case "function":
       case "procedure":
       case "aggregate":
         return {

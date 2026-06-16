@@ -54,9 +54,9 @@ describe("routine metadata/ACL rendering (function vs procedure)", () => {
     const actions = plan(base([]), base([procFact, procComment])).actions;
     const sql = actions.map((a) => a.sql);
     expect(sql).toContain(`COMMENT ON PROCEDURE "app"."p"() IS 'does things'`);
-    expect(
-      sql.some((s) => s.includes(`COMMENT ON FUNCTION "app"."p"()`)),
-    ).toBe(false);
+    expect(sql.some((s) => s.includes(`COMMENT ON FUNCTION "app"."p"()`))).toBe(
+      false,
+    );
   });
 
   test("GRANT EXECUTE on a procedure uses PROCEDURE, not FUNCTION", () => {
@@ -65,5 +65,38 @@ describe("routine metadata/ACL rendering (function vs procedure)", () => {
     expect(sql).toContain(`GRANT EXECUTE ON PROCEDURE "app"."p"() TO "r"`);
     expect(sql).toContain(`REVOKE ALL ON PROCEDURE "app"."p"() FROM "r"`);
     expect(sql.some((s) => s.includes(`ON FUNCTION "app"."p"()`))).toBe(false);
+  });
+
+  // regression guard: a real function must still render the FUNCTION keyword.
+  test("COMMENT/GRANT on a function still use FUNCTION", () => {
+    const fnId: StableId = {
+      kind: "function",
+      schema: "app",
+      name: "f",
+      args: [],
+    };
+    const fnFact: Fact = {
+      id: fnId,
+      parent: { kind: "schema", name: "app" },
+      payload: {
+        def: `CREATE FUNCTION "app"."f"() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$`,
+      },
+    };
+    const fnComment: Fact = {
+      id: { kind: "comment", target: fnId },
+      parent: fnId,
+      payload: { text: "computes" },
+    };
+    const fnAcl: Fact = {
+      id: { kind: "acl", target: fnId, grantee: "r" },
+      parent: fnId,
+      payload: { privileges: ["EXECUTE"], grantable: [] },
+    };
+    const sql = plan(base([]), base([fnFact, fnComment, fnAcl])).actions.map(
+      (a) => a.sql,
+    );
+    expect(sql).toContain(`COMMENT ON FUNCTION "app"."f"() IS 'computes'`);
+    expect(sql).toContain(`GRANT EXECUTE ON FUNCTION "app"."f"() TO "r"`);
+    expect(sql.some((s) => s.includes(`ON PROCEDURE "app"."f"()`))).toBe(false);
   });
 });

@@ -17,7 +17,7 @@
  * Old-3: objectType trigger AND trigger-schema IN SYSTEM
  *        AND NOT trigger-function_schema IN SYSTEM
  *        AND NOT (schema=pgmq AND table matches q_/a_ prefix)
- *        → { kind:"trigger", schema IN SYSTEM, not edgeTo{kind:"procedure", schema IN SYSTEM},
+ *        → { kind:"trigger", schema IN SYSTEM, not edgeTo{kind:"function", schema IN SYSTEM},
  *            not (schema=pgmq AND table glob q_* or a_*) } → include
  *
  * Old-4: "star-slash-schema" IN SUPABASE_SYSTEM_SCHEMAS
@@ -211,7 +211,7 @@ export const supabasePolicy: Policy = {
           {
             not: {
               edgeTo: {
-                kind: "procedure",
+                kind: "function",
                 schema: [...SUPABASE_SYSTEM_SCHEMAS],
               },
             },

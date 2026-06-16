@@ -33,6 +33,7 @@ const FACT_KINDS = [
   "publicationSchema",
   "securityLabel",
   "defaultPrivilege",
+  "function",
   "procedure",
   "aggregate",
   "publication",

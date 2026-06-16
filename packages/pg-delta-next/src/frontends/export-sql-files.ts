@@ -56,6 +56,7 @@ const SCHEMA_DIRS: Record<string, string> = {
   view: "views",
   materializedView: "materialized_views",
   foreignTable: "foreign_tables",
+  function: "functions",
   procedure: "functions",
   aggregate: "functions",
 };

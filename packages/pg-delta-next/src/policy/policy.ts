@@ -44,7 +44,7 @@
  * (provenance: depends / owner / memberOfExtension / managedBy) and/or to a
  * fact whose id.kind equals `kind` and/or whose id `schema` matches a glob.
  * Needed for: detecting user-created triggers whose function lives in a
- * non-managed schema (edgeTo {kind: "procedure", schema: not in
+ * non-managed schema (edgeTo {kind: "function", schema: not in
  * SYSTEM_SCHEMAS}), and for provenance filtering of operationally-managed
  * objects (edgeTo {edgeKind: "managedBy"}).
  *

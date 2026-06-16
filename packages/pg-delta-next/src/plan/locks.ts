@@ -95,6 +95,7 @@ const NO_RELATION_LOCK_KINDS = new Set([
   "membership",
   "defaultPrivilege",
   "extension",
+  "function",
   "procedure",
   "aggregate",
   "domain",
