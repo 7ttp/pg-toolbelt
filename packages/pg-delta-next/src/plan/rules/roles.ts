@@ -15,17 +15,36 @@ import {
   roleFlagSql,
 } from "./helpers.ts";
 
+/** `ALTER ROLE <role> SET <key> TO <value>` — the single rendering of a role
+ *  GUC config entry, shared by the create rule (materializing config on a fresh
+ *  role) and the config set-delta alter (changing it later). `role` is already
+ *  quoted by the caller. */
+function roleConfigSetSql(role: string, key: string, value: string): string {
+  return `ALTER ROLE ${role} SET ${qid(key)} TO ${lit(value)}`;
+}
+
 export const roleRules: Record<string, KindRules> = {
   role: {
     weight: 0,
     rename: renameRule(
       (fact) => `ALTER ROLE ${qid((fact.id as { name: string }).name)}`,
     ),
-    create: (fact) => [
-      {
-        sql: `CREATE ROLE ${qid((fact.id as { name: string }).name)} WITH ${roleFlagSql(fact.payload)}`,
-      },
-    ],
+    // a create rule must materialize EVERY payload attribute not carried by a
+    // child fact or edge: CREATE ROLE … WITH <flags>, then one
+    // `ALTER ROLE … SET` per desired config entry (review P1 — creating a
+    // configured role must not drop its GUC config). Follow-up actions consume
+    // the role fact so they order after the CREATE.
+    create: (fact) => {
+      const role = qid((fact.id as { name: string }).name);
+      const specs: ActionSpec[] = [
+        { sql: `CREATE ROLE ${role} WITH ${roleFlagSql(fact.payload)}` },
+      ];
+      for (const entry of (p(fact, "config") as string[] | null) ?? []) {
+        const [key, value] = splitOption(entry);
+        specs.push({ sql: roleConfigSetSql(role, key, value) });
+      }
+      return specs;
+    },
     drop: (fact) => {
       const name = qid((fact.id as { name: string }).name);
       // DROP OWNED clears residual default privileges / grants in this
@@ -60,9 +79,7 @@ export const roleRules: Record<string, KindRules> = {
           }
           for (const [key, value] of newCfg) {
             if (oldCfg.get(key) !== value) {
-              specs.push({
-                sql: `ALTER ROLE ${role} SET ${qid(key)} TO ${lit(value)}`,
-              });
+              specs.push({ sql: roleConfigSetSql(role, key, value) });
             }
           }
           return specs;
