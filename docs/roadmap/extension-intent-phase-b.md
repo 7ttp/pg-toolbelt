@@ -21,14 +21,29 @@
 
 ## 0. What Phase A already built (the substrate B extends)
 
+> The substrate is now the **integration profile** (the post-handoff-review
+> refactor). The old `excludeManaged` / `extractWithHandlers` / `extractManaged`
+> recipe was removed — handlers run inside `extract`, `resolveView` projects
+> `managedBy`, and `resolveProfile` composes the option bundles. Build Phase B on
+> the profile, not the removed helpers.
+
 - `EdgeKind` includes `"managedBy"` (`src/core/fact.ts`).
-- `excludeManaged(factBase)` — fact-level subtraction of `managedBy`-tagged
-  facts + descendants (`src/policy/managed.ts`).
-- `ExtensionHandler` interface + `extractWithHandlers` + `extractManaged`
-  (`src/policy/extensions/`); the **pg_partman** handler emits `managedBy` edges
-  from `part_config` + a recursive `pg_inherits` walk.
-- `provePlan` takes a `reextract` option so the proof re-extract is
-  managed-aware (`src/proof/prove.ts`).
+- The `ExtensionHandler` contract lives in `src/extract/handler.ts`; its
+  `capture(ctx, current)` receives a **snapshot-bound** `HandlerContext`.
+  `extract(pool, { handlers })` (`src/extract/extract.ts`) runs handlers inside
+  the same repeatable-read transaction as core extraction. The **pg_partman**
+  handler emits `managedBy` edges from `part_config` + a recursive `pg_inherits`
+  walk (`src/policy/extensions/pg-partman.ts`).
+- `resolveView(...)` (`src/policy/policy.ts`) is the **single projection point**:
+  it projects out `managedBy` (and `memberOfExtension`) facts + descendants, on
+  both sides and the proof re-extract. (`excludeByProvenance` in
+  `src/policy/view.ts` is the underlying primitive; there is no caller-side
+  `excludeManaged` step anymore.)
+- `resolveProfile(pool, profile, …)` (`src/integrations/`) is the public
+  composition module. It returns a handler-aware `extract` plus `planOptions` /
+  `proveOptions` / `applyOptions` whose `reextract` re-extracts handler-aware, so
+  the proof re-extract and the apply fingerprint gate reconstruct the same
+  managed view. `provePlan` / `apply` accept that `reextract` option directly.
 
 Phase B adds the **intent** half: handlers also emit `extensionIntent` facts,
 and the planner renders them as replay actions.
@@ -73,7 +88,10 @@ and the planner renders them as replay actions.
 
 ### Proof (`src/proof/prove.ts`)
 - `provePlan(plan, clonePool, desired, { reextract })`; default reextract is
-  core `extract`. Integration passes `extractManaged`.
+  core `extract`. The profile supplies a handler-aware `reextract`
+  (`ctx.proveOptions.reextract`, i.e. `extract(pool, { handlers })`), so the
+  proof re-extract emits the same `managedBy` edges and `resolveView` projects
+  the same managed view.
 
 ---
 
@@ -174,8 +192,9 @@ Order by complexity (validate the mechanism on the simplest first):
 - **Commit per handler** (`feat(pg-delta-next): pgmq intent replay`, …).
 
 ### Step 4 — intent proof + full regression
-- Extend the proof: after apply, `extractManaged` re-capture must converge on
-  intent too (it already does — intent facts flow through the same diff). Add a
+- Extend the proof: after apply, the handler-aware re-extract
+  (`ctx.proveOptions.reextract`) must converge on intent too (it already does —
+  intent facts flow through the same diff). Add a
   replay-roundtrip integration test per extension asserting `verdict.ok` and
   intent re-capture equality, plus data-preservation (seeded queue messages /
   partition rows survive where the plan claims `dataLoss:"none"`).
@@ -190,8 +209,9 @@ Order by complexity (validate the mechanism on the simplest first):
 ## 4. Gotchas captured from Phase A
 
 - **Proof consistency is fact-level.** Intent + managed exclusion must be
-  applied symmetrically to source, desired, AND the proof `reextract`
-  (`extractManaged`). A delta-only filter drifts the proof. (Already learned;
+  applied symmetrically to source, desired, AND the proof `reextract` (the
+  profile's handler-aware re-extractor, projected through `resolveView`). A
+  delta-only filter drifts the proof. (Already learned;
   applies to intent facts too — but intent facts are *kept*, only operational
   objects are excluded.)
 - **Desired must keep the extension installed.** A declarative desired that

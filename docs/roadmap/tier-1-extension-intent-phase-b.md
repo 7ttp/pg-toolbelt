@@ -21,17 +21,26 @@ one-graph sort + proof loop as schema. **No second pipeline.**
 
 ## Where Phase A left it (the substrate B extends)
 
-Phase A (shipped, proven) gives Phase B everything except the intent half:
+Phase A (shipped, proven) gives Phase B everything except the intent half. The
+substrate is the **integration profile** (post-handoff-review refactor): the old
+`excludeManaged` / `extractWithHandlers` / `extractManaged` recipe was removed —
+build on the profile, not those names.
 
 - `EdgeKind` includes `"managedBy"` (`packages/pg-delta-next/src/core/fact.ts`).
-- `excludeManaged(factBase)` fact-level subtraction
-  (`packages/pg-delta-next/src/policy/managed.ts`) — and its 4b counterpart
-  `excludeExtensionMembers` (`packages/pg-delta-next/src/policy/extension-members.ts`).
-- `ExtensionHandler` + `extractWithHandlers` + `extractManaged`
-  (`packages/pg-delta-next/src/policy/extensions/`); the **pg_partman** handler
-  emits `managedBy` edges today.
-- `provePlan(...)` takes a `reextract` option so the proof re-extract is
-  managed-aware (`packages/pg-delta-next/src/proof/prove.ts`).
+- `resolveView(...)` (`packages/pg-delta-next/src/policy/policy.ts`) is the single
+  projection point: it projects out `managedBy` and `memberOfExtension` facts +
+  descendants on both sides and the proof re-extract (over `excludeByProvenance`
+  in `src/policy/view.ts`).
+- The `ExtensionHandler` contract is in
+  `packages/pg-delta-next/src/extract/handler.ts`; `extract(pool, { handlers })`
+  runs handlers inside the extraction snapshot. The **pg_partman** handler
+  (`src/policy/extensions/pg-partman.ts`) emits `managedBy` edges today.
+- `resolveProfile(...)` (`packages/pg-delta-next/src/integrations/`) composes the
+  handler-aware `extract` + `planOptions`/`proveOptions`/`applyOptions`; the
+  bundles' `reextract` keeps the proof re-extract and apply gate managed-aware.
+- `provePlan(...)` / `apply(...)` take a `reextract` option (supplied by the
+  profile) so the proof re-extract and fingerprint gate stay managed-aware
+  (`packages/pg-delta-next/src/proof/prove.ts`, `src/apply/apply.ts`).
 
 **Verified absent in code (the work itself):** no `extensionIntent` kind in
 `packages/pg-delta-next/src/core/stable-id.ts`; no intent rules in
@@ -55,9 +64,9 @@ signatures, and call sites are in [`../extension-intent-phase-b-plan.md`](extens
 3. **Capture + replay per extension** — one handler per commit, simplest first:
    **pgmq** (no `consumes`) → **pg_cron** (opaque command, order late) →
    **pg_partman** Deliverable B (`consumes` the parent table).
-4. **Intent proof + full regression** — `extractManaged` re-capture must
-   converge on intent too; per-extension replay-roundtrip integration tests;
-   full corpus green PG15+17.
+4. **Intent proof + full regression** — the profile's handler-aware re-extract
+   (`ctx.proveOptions.reextract`) must converge on intent too; per-extension
+   replay-roundtrip integration tests; full corpus green PG15+17.
 
 ## The decision that gates this — and it is NOT code (CLI-1431 / CLI-1430)
 
