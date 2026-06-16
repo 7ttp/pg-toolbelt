@@ -21,6 +21,7 @@ import {
   buildActionGraph,
   compactColumnFolds,
   computeSafetyReport,
+  elideRedundantDrops,
 } from "./internal.ts";
 import { projectTarget } from "./project.ts";
 import { lockClassFor, type LockClass } from "./locks.ts";
@@ -923,15 +924,21 @@ export function plan(
   // graph predecessor of the folded action sits at or before the target —
   // i.e. no edge crosses the merge. Purely cosmetic: produces/consumes
   // merge, so ordering semantics and the proof are unchanged.
+  // second cosmetic pass (§3.6): drop a replace's redundant drop when the
+  // create reproduces the identical statement (e.g. ACL's self-resetting
+  // grantActions). Runs on the already-folded list — disjoint from column folds.
   const finalActions =
     options?.compact !== false
-      ? compactColumnFolds(
-          orderedActions,
-          order,
-          edges,
-          foldHints,
-          acceptsFolds,
-          positionOf,
+      ? elideRedundantDrops(
+          compactColumnFolds(
+            orderedActions,
+            order,
+            edges,
+            foldHints,
+            acceptsFolds,
+            positionOf,
+          ),
+          source,
         )
       : orderedActions;
 

@@ -301,6 +301,70 @@ export function compactColumnFolds(
     : [...orderedActions];
 }
 
+/**
+ * Compaction (§3.6), redundant-drop elision: a replace renders as drop + create,
+ * but some kinds' create is self-resetting — `acl`'s `grantActions` leads with
+ * its own `REVOKE ALL … FROM grantee`, byte-identical to the replace's drop. The
+ * drop is then a redundant (idempotent) statement. This is GENERAL to every ACL
+ * privilege change, so it is prettified here in the cosmetic pass rather than
+ * special-cased per kind in the planner (correctness first, prettify later).
+ *
+ * Purely cosmetic + provably safe via LOCAL checks (no graph walk): remove a
+ * `drop` D destroying a single id I when a `create` P re-produces I with the
+ * SAME sql, and removing D cannot lose an ordering constraint —
+ *   - D.consumes ⊆ P.consumes, so every producer that had to precede D also has
+ *     to precede P (which remains);
+ *   - nothing `releases` I (a releaser would order before D's destruction);
+ *   - I has no children, so no child-teardown is ordered before D.
+ * Those exhaust the edge kinds that can point INTO a drop, so P inherits all of
+ * D's predecessors and the byte-identical statement reproduces D's effect.
+ */
+export function elideRedundantDrops(
+  actions: readonly Action[],
+  source: FactBase,
+): Action[] {
+  // first create that produces each id, with its sql + consume set
+  const producerOf = new Map<
+    string,
+    { index: number; sql: string; consumes: Set<string> }
+  >();
+  actions.forEach((action, index) => {
+    if (action.verb !== "create") return;
+    for (const id of action.produces) {
+      const key = encodeId(id);
+      if (!producerOf.has(key)) {
+        producerOf.set(key, {
+          index,
+          sql: action.sql,
+          consumes: new Set(action.consumes.map(encodeId)),
+        });
+      }
+    }
+  });
+  const releasedIds = new Set<string>();
+  for (const action of actions)
+    for (const id of action.releases) releasedIds.add(encodeId(id));
+
+  const remove = new Set<number>();
+  actions.forEach((action, index) => {
+    if (action.verb !== "drop" || action.destroys.length !== 1) return;
+    const id = action.destroys[0] as StableId;
+    const key = encodeId(id);
+    const producer = producerOf.get(key);
+    if (producer === undefined || producer.index === index) return;
+    if (producer.sql !== action.sql) return; // not a byte-identical reproduce
+    if (releasedIds.has(key)) return; // a releaser is ordered before this drop
+    if (source.childrenOf(id).length > 0) return; // child-teardown precedes it
+    if (!action.consumes.every((c) => producer.consumes.has(encodeId(c))))
+      return; // P would not inherit all of D's producer-predecessors
+    remove.add(index);
+  });
+
+  return remove.size > 0
+    ? actions.filter((_, index) => !remove.has(index))
+    : [...actions];
+}
+
 /** Aggregate the per-action safety metadata (§3.7): destructive / rewrite /
  *  non-transactional counts and a histogram of documented lock classes. */
 export function computeSafetyReport(actions: readonly Action[]): SafetyReport {

@@ -97,4 +97,54 @@ describe("compaction", () => {
       await Promise.all([source.drop(), desired.drop()]);
     }
   }, 60_000);
+
+  test("ACL replace: redundant REVOKE elided when compacted; same proof on/off", async () => {
+    const cluster = await sharedCluster();
+    const srcA = await cluster.createDb("compact_acl_a");
+    const srcB = await cluster.createDb("compact_acl_b");
+    const desired = await cluster.createDb("compact_acl_dst");
+    await cluster.adminPool
+      .query(`CREATE ROLE compact_acl_grantee NOLOGIN`)
+      .catch(() => {});
+    try {
+      const seed = `
+        CREATE SCHEMA app;
+        CREATE TABLE app.t (id int);
+        GRANT SELECT ON app.t TO compact_acl_grantee;
+      `;
+      await srcA.pool.query(seed);
+      await srcB.pool.query(seed);
+      await desired.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.t (id int);
+        GRANT SELECT, INSERT ON app.t TO compact_acl_grantee;
+      `);
+      const [aState, bState, desiredState] = [
+        await extract(srcA.pool),
+        await extract(srcB.pool),
+        await extract(desired.pool),
+      ];
+
+      const compacted = plan(aState.factBase, desiredState.factBase);
+      const decomposed = plan(bState.factBase, desiredState.factBase, {
+        compact: false,
+      });
+
+      const revokes = (p: typeof compacted) =>
+        p.actions.filter((x) => x.sql.includes("REVOKE ALL ON TABLE")).length;
+      // the create's self-resetting REVOKE makes the replace's drop redundant
+      expect(revokes(decomposed)).toBe(2);
+      expect(revokes(compacted)).toBe(1);
+
+      // …and the elided plan is still correct: same clean proof, on and off
+      const [verdictA, verdictB] = [
+        await provePlan(compacted, srcA.pool, desiredState.factBase),
+        await provePlan(decomposed, srcB.pool, desiredState.factBase),
+      ];
+      expect(verdictA.ok).toBe(true);
+      expect(verdictB.ok).toBe(true);
+    } finally {
+      await Promise.all([srcA.drop(), srcB.drop(), desired.drop()]);
+    }
+  }, 120_000);
 });
