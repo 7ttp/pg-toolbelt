@@ -105,11 +105,13 @@ export interface Plan {
    *  inlined so a later prove/apply recovers the SAME view. `memberOf` is an
    *  array → the artifact round-trips losslessly. */
   capability?: ApplierCapability;
-  /** the integration profile that produced this plan, stamped by the CLI when a
-   *  known profile is selected. `apply`/`prove` default to this profile when
-   *  `--profile` is omitted and reject a contradicting `--profile`, so the
-   *  plan == prove == apply invariant is enforced by the artifact, not just by a
-   *  comment. Absent on library-produced (raw) artifacts. */
+  /** the integration profile that produced this plan, stamped whenever the plan
+   *  was produced through a resolved profile (always, via the CLI). `apply`/
+   *  `prove` default to this profile when `--profile` is omitted and reject a
+   *  contradicting `--profile`, so the plan == prove == apply invariant is
+   *  enforced by the artifact, not just by a comment. Absent only when `plan()`
+   *  is called directly with no profile (the raw, no-integration library path —
+   *  e.g. the corpus); such a plan is treated as `raw`. */
   profile?: { id: string };
   /** every rename candidate found, applied or not — "prompt" mode renders
    *  these as questions; near-misses explain why they degraded (§4.1) */

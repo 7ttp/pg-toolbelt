@@ -50,8 +50,9 @@ export function resolveCliProfile(
  * Reconcile the `--profile` flag with the profile id stamped on a plan artifact
  * (apply/prove). The apply/prove profile MUST match the plan's, so:
  *
- * - `--profile` omitted → use the plan's stamped id (or undefined → raw for a
- *   legacy/library artifact);
+ * - `--profile` omitted → use the plan's stamped id (or undefined → raw when the
+ *   plan carries no profile, i.e. it came from a direct library `plan()` call
+ *   with no integration);
  * - `--profile` given → use it, but throw if it contradicts the plan's stamp.
  *
  * The returned id is fed to {@link resolveCliProfile} / {@link profileById},

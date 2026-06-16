@@ -75,7 +75,7 @@ describe("plan artifact v1", () => {
     expect(parsed.profile).toEqual({ id: "supabase" });
   });
 
-  test("a legacy artifact without a profile field parses (profile undefined)", () => {
+  test("a profile-less plan (direct library plan()) parses (profile undefined)", () => {
     const parsed = parsePlan(serializePlan(samplePlan));
     expect(parsed.profile).toBeUndefined();
   });

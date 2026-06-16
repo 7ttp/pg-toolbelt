@@ -33,7 +33,7 @@ describe("effectiveProfileId (apply/prove: flag vs plan-stamped profile)", () =>
     expect(effectiveProfileId(undefined, "supabase")).toBe("supabase");
   });
 
-  test("legacy artifact (no stamp) + no flag → undefined (resolves to raw)", () => {
+  test("profile-less plan (library plan()) + no flag → undefined (resolves to raw)", () => {
     expect(effectiveProfileId(undefined, undefined)).toBeUndefined();
   });
 
