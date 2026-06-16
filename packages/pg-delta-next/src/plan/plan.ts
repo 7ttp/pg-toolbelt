@@ -2,37 +2,24 @@
  * The planner (target-architecture §3.4–3.6): deltas × rule table → atomic
  * actions → one mixed dependency graph → one deterministic sort.
  */
-import { diff, type Delta } from "../core/diff.ts";
+import type { Delta } from "../core/diff.ts";
 import type { Fact, FactBase } from "../core/fact.ts";
-import { canonicalize, type Payload } from "../core/hash.ts";
+import { canonicalize } from "../core/hash.ts";
 import { encodeId, type StableId } from "../core/stable-id.ts";
-import {
-  factMatches,
-  filterDeltas,
-  flattenPolicy,
-  resolveView,
-  validatePolicy,
-  type Policy,
-} from "../policy/policy.ts";
+import { factMatches, flattenPolicy, type Policy } from "../policy/policy.ts";
 import { canSetOwner, type ApplierCapability } from "../policy/capability.ts";
 import { finalizeActions } from "./phases/action-graph.ts";
+import { buildChangeSet } from "./phases/change-set.ts";
 import { expandReplacements } from "./phases/replacement-expansion.ts";
 import { ruleFlag } from "./rule-flags.ts";
-import { projectTarget } from "./project.ts";
 import { lockClassFor, type LockClass } from "./locks.ts";
 import { grantTarget, qid } from "./render.ts";
 import {
-  matchRenameCandidates,
   subtreeIds,
   type RenameCandidate,
   type RenameMode,
 } from "./renames.ts";
-import {
-  buildRoleRenameMap,
-  computeRoleRenameCarry,
-  ownerEdgeKey,
-  roleNamesIn,
-} from "./role-rename-carry.ts";
+import { ownerEdgeKey } from "./role-rename-carry.ts";
 import {
   KNOWN_PARAMS,
   rulesFor,
@@ -152,43 +139,30 @@ export interface PlanOptions {
 }
 
 export function plan(
-  source: FactBase,
-  desired: FactBase,
+  rawSource: FactBase,
+  rawDesired: FactBase,
   options?: PlanOptions,
 ): Plan {
-  if (options?.policy) validatePolicy(options.policy);
-  // a declared baseline must NEVER be silently ignored (review finding 3): if
-  // the policy names a baseline, the caller must resolve it (resolveBaseline)
-  // and pass it as options.baseline. Refuse otherwise — at every entry point.
-  if (
-    options?.policy?.baseline !== undefined &&
-    options.baseline === undefined
-  ) {
-    throw new Error(
-      `plan: policy "${options.policy.id}" declares baseline "${options.policy.baseline}" ` +
-        `but no resolved baseline was provided. Resolve it with ` +
-        `resolveBaseline(policy, { pgMajor }) and pass it as options.baseline, so ` +
-        `platform facts are actually subtracted — a declared baseline is never silently ignored.`,
-    );
-  }
-  // the managed VIEW the engine diffs (docs/architecture/managed-view-architecture.md): the
-  // platform baseline is subtracted, then the policy's scope (non-`verb`) rules
-  // + extension-member provenance are projected out at the FACT level on BOTH
-  // sides, so the proof stays honest by construction. `verb` rules remain for
-  // the delta-level filter below. With no policy/baseline this is exactly
-  // `excludeExtensionMembers`, so the corpus is unchanged.
-  source = resolveView(
+  // ── phase 1: change set (managed-view resolution, diff, filter, group,
+  // rename + role-rename cancellation) → ./phases/change-set.ts. `source` /
+  // `desired` below are the RESOLVED managed views. ────────────────────
+  const {
     source,
-    options?.policy,
-    options?.capability,
-    options?.baseline,
-  );
-  desired = resolveView(
     desired,
-    options?.policy,
-    options?.capability,
-    options?.baseline,
-  );
+    projectedDesired,
+    deltas,
+    filteredDeltas,
+    removed,
+    added,
+    setsByFact,
+    renameCandidates,
+    acceptedRenames,
+    roleRenameMap,
+    carriedOwnerLinks,
+    changedRoleFacts,
+  } = buildChangeSet(rawSource, rawDesired, options);
+
+  // serialize params are emission-time setup, independent of the change set.
   const params: PlanParams = options?.params ?? {};
   for (const name of Object.keys(params)) {
     if (!KNOWN_PARAMS.has(name)) {
@@ -197,105 +171,11 @@ export function plan(
       );
     }
   }
-  // policy serialize rules apply PER FACT (first matching rule's params,
-  // §3.9) — explicit options.params override rule-supplied values
+  // policy serialize rules apply PER FACT (first matching rule's params, §3.9) —
+  // explicit options.params override rule-supplied values
   const serializeRules = options?.policy
     ? flattenPolicy(options.policy).serialize
     : [];
-  const allDeltas = diff(source, desired);
-  const { kept: deltas, filtered: filteredDeltas } = options?.policy
-    ? filterDeltas(allDeltas, options.policy, source, desired)
-    : { kept: allDeltas, filtered: [] };
-  // the honest plan target: `desired` with every FILTERED delta reverted to
-  // its source value, since the plan only applies KEPT deltas (review #2). The
-  // fingerprint and the proof both target THIS, not full `desired`.
-  const projectedDesired = projectTarget(desired, filteredDeltas);
-
-  const removed = new Map<string, Fact>();
-  const added = new Map<string, Fact>();
-  const setsByFact = new Map<string, Extract<Delta, { verb: "set" }>[]>();
-  for (const delta of deltas) {
-    if (delta.verb === "remove")
-      removed.set(encodeId(delta.fact.id), delta.fact);
-    if (delta.verb === "add") added.set(encodeId(delta.fact.id), delta.fact);
-    if (delta.verb === "set") {
-      const key = encodeId(delta.id);
-      const list = setsByFact.get(key) ?? [];
-      list.push(delta);
-      setsByFact.set(key, list);
-    }
-  }
-
-  // ── rename detection (§4.1, stage 9) ──────────────────────────────────
-  // accepted renames cancel their remove/add subtrees BEFORE replace,
-  // rebuild, and suppression see them; the rename action is emitted later
-  const renameMode: RenameMode = options?.renames ?? "off";
-  const renameCandidates: RenameCandidate[] = [];
-  const acceptedRenames: Array<{ from: Fact; to: Fact }> = [];
-  if (renameMode !== "off") {
-    const candidates = matchRenameCandidates(removed, added, source, desired);
-    renameCandidates.push(...candidates);
-    const confirmed = new Set(
-      (options?.acceptRenames ?? []).map(
-        (r) => `${encodeId(r.from)}>${encodeId(r.to)}`,
-      ),
-    );
-    for (const candidate of candidates) {
-      if (candidate.status !== "unambiguous") continue;
-      const key = `${encodeId(candidate.from)}>${encodeId(candidate.to)}`;
-      if (renameMode === "prompt" && !confirmed.has(key)) continue;
-      const fromFact = removed.get(encodeId(candidate.from)) as Fact;
-      const toFact = added.get(encodeId(candidate.to)) as Fact;
-      // structural equality covers the whole subtree: cancel every
-      // descendant's remove/add — the rename carries them implicitly
-      for (const id of subtreeIds(source, candidate.from))
-        removed.delete(encodeId(id));
-      for (const id of subtreeIds(desired, candidate.to))
-        added.delete(encodeId(id));
-      acceptedRenames.push({ from: fromFact, to: toFact });
-    }
-  }
-
-  // ── role-rename carry (role-rename-carry.ts) ──────────────────────────
-  // PostgreSQL carries every role-name-bearing fact through `ALTER ROLE …
-  // RENAME` by OID. The diff still surfaces those as remove/add (or owner
-  // unlink/link) pairs differing only by the renamed name; this Module decides,
-  // in ONE place, which the rename carries so emission re-issues no DDL for
-  // them. carriedFactKeys (acl/membership/userMapping/defaultPrivilege) are
-  // cancelled from the worklists here; carriedOwnerLinks are skipped in the
-  // owner-edge loop below (where the role-only-rename owner cycle lived).
-  const roleRenameMap = buildRoleRenameMap(acceptedRenames);
-  const { carriedFactKeys, carriedOwnerLinks, changedFacts } =
-    computeRoleRenameCarry(deltas, roleRenameMap);
-  for (const key of carriedFactKeys) {
-    removed.delete(key);
-    added.delete(key);
-  }
-  // A changed pair carries the IDENTITY (old name → new name by OID) but the
-  // payload also changed. Cancel the old-name teardown AND the new-name create,
-  // and capture the facts so the emit phase can mutate the post-rename id
-  // instead (review P2, fourth follow-up). The renamed roles the new id
-  // references order that mutation AFTER the role rename.
-  const targetRoleNames = new Set(roleRenameMap.values());
-  const changedRoleFacts: Array<{
-    toFact: Fact;
-    fromPayload: Payload;
-    orderingConsumes: StableId[];
-  }> = [];
-  for (const { from, to } of changedFacts) {
-    const fromFact = removed.get(encodeId(from));
-    const toFact = added.get(encodeId(to));
-    removed.delete(encodeId(from));
-    added.delete(encodeId(to));
-    if (fromFact === undefined || toFact === undefined) continue;
-    changedRoleFacts.push({
-      toFact,
-      fromPayload: fromFact.payload,
-      orderingConsumes: [...roleNamesIn(to)]
-        .filter((name) => targetRoleNames.has(name))
-        .map((name) => ({ kind: "role", name }) as StableId),
-    });
-  }
 
   // ── phase 2: replacement expansion + drop-root suppression ────────────
   // Classify set-deltas (alter vs replace), expand the forced dependent
