@@ -257,7 +257,16 @@ export async function loadSqlFiles(
     extract?: (pool: Pool, options?: ExtractOptions) => Promise<ExtractResult>;
   } = {},
 ): Promise<LoadResult> {
-  const maxRounds = options.maxRounds ?? 25;
+  // Rounds scale with dependency DEPTH, not file count: each round resolves
+  // every file whose dependencies now exist. A deterministic, convergent load
+  // therefore needs at most `files.length` rounds (worst case — a fully
+  // reverse-ordered linear chain resolves one file per round); the zero-progress
+  // check below fails genuine non-convergence (missing object, cycle) IMMEDIATELY
+  // with the real per-file errors. So `maxRounds` is purely an oscillation
+  // backstop for non-deterministic SQL, NOT a depth limit — it must scale with
+  // the file count (floor 25 preserves the small-schema default). A fixed 25
+  // used to wrongly fail any chain deeper than 25 that was still making progress.
+  const maxRounds = options.maxRounds ?? Math.max(files.length + 1, 25);
   const mode = options.mode ?? "databaseScratch";
   const extractShadow = options.extract ?? extract;
 
