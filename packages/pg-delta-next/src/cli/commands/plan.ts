@@ -15,19 +15,19 @@
  *   In prompt mode, accepted renames become real renames; unconfirmed unambiguous
  *   candidates are treated as drop+create.
  */
-import { extract } from "../../extract/extract.ts";
 import { plan } from "../../plan/plan.ts";
 import { serializePlan } from "../../plan/artifact.ts";
 import { encodeId, parseId, type StableId } from "../../core/stable-id.ts";
-import { probeApplierCapability } from "../../policy/capability.ts";
 import { exitIfBlocking, printDiagnostics } from "../diagnostics.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
+import { PROFILE_IDS, resolveCliProfile } from "../profile.ts";
 import type { RenameMode } from "../../plan/renames.ts";
 import { writeFileSync } from "node:fs";
 
 const USAGE =
   "Usage: pg-delta-next plan --source <pg-url> --desired <pg-url> " +
+  `[--profile ${PROFILE_IDS}] ` +
   "[--renames auto|prompt|off] [--no-compact] [--out <plan.json>] " +
   "[--accept-rename <from>=<to>] ... [--restrict-to-applier] [--strict-coverage]\n";
 
@@ -37,6 +37,7 @@ export async function cmdPlan(args: string[]): Promise<void> {
     parsed = parseFlags(args, {
       source: { type: "value", required: true },
       desired: { type: "value", required: true },
+      profile: { type: "value" },
       renames: { type: "value" },
       "no-compact": { type: "boolean" },
       out: { type: "value" },
@@ -97,11 +98,19 @@ export async function cmdPlan(args: string[]): Promise<void> {
   const src = makePool(sourceUrl);
   const dst = makePool(desiredUrl);
   try {
+    // Resolve the profile against the SOURCE pool (the source is the apply
+    // target): this composes handler-aware extraction, the profile's policy +
+    // baseline, and — with --restrict-to-applier — the applier capability. All
+    // three flow into planOptions so plan == prove == apply (P0/P2).
+    const ctx = await resolveCliProfile(src.pool, flags["profile"], {
+      restrictToApplier: flags["restrict-to-applier"],
+    });
+
     process.stderr.write("Extracting source...\n");
     process.stderr.write("Extracting desired...\n");
     const [sourceResult, desiredResult] = await Promise.all([
-      extract(src.pool),
-      extract(dst.pool),
+      ctx.extract(src.pool),
+      ctx.extract(dst.pool),
     ]);
 
     // surface extraction diagnostics (review finding 2); --strict-coverage
@@ -116,18 +125,11 @@ export async function cmdPlan(args: string[]): Promise<void> {
       },
     );
 
-    // --restrict-to-applier: probe the SOURCE connection's capability (the
-    // source is the apply target) and restrict the plan to what that role can
-    // execute — FDW ACLs for a non-superuser drop out; an unsettable owner
-    // fail-fasts. Default off preserves behaviour for source≠applier flows.
-    const capability = flags["restrict-to-applier"]
-      ? await probeApplierCapability(src.pool)
-      : undefined;
     const planOptions = {
       renames,
       compact,
       ...(acceptRenames.length > 0 ? { acceptRenames } : {}),
-      ...(capability ? { capability } : {}),
+      ...ctx.planOptions, // policy, capability, baseline (from the profile)
     };
     const thePlan = plan(
       sourceResult.factBase,

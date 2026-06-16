@@ -10,6 +10,7 @@ import { parsePlan } from "../../plan/artifact.ts";
 import { apply } from "../../apply/apply.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
+import { PROFILE_IDS, resolveCliProfile } from "../profile.ts";
 
 export async function cmdApply(args: string[]): Promise<void> {
   let parsed;
@@ -17,12 +18,13 @@ export async function cmdApply(args: string[]): Promise<void> {
     parsed = parseFlags(args, {
       plan: { type: "value", required: true },
       target: { type: "value", required: true },
+      profile: { type: "value" },
       force: { type: "boolean" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next apply --plan <plan.json> --target <pg-url> [--force]\n`,
+        `${err.message}\nUsage: pg-delta-next apply --plan <plan.json> --target <pg-url> [--profile ${PROFILE_IDS}] [--force]\n`,
       );
       process.exit(2);
     }
@@ -44,10 +46,15 @@ export async function cmdApply(args: string[]): Promise<void> {
         "WARNING: --force disables the fingerprint gate. Applying without state verification.\n",
       );
     }
+    // The profile MUST match the one used to plan: it supplies the handler-aware
+    // re-extractor + baseline the fingerprint gate needs to reconstruct the same
+    // managed view (otherwise operational children on the target read as drift).
+    const ctx = await resolveCliProfile(tgt.pool, flags["profile"]);
     process.stderr.write(`Applying ${thePlan.actions.length} action(s)...\n`);
 
     const report = await apply(thePlan, tgt.pool, {
       fingerprintGate: !force,
+      ...ctx.applyOptions, // reextract (handler-aware) + baseline
     });
 
     if (report.status === "applied") {

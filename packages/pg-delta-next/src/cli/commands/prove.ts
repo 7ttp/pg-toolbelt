@@ -12,6 +12,7 @@ import { loadSnapshot } from "../../frontends/snapshot-file.ts";
 import { encodeId } from "../../core/stable-id.ts";
 import { makePool } from "../pool.ts";
 import { parseFlags, UsageError } from "../flags.ts";
+import { PROFILE_IDS, resolveCliProfile } from "../profile.ts";
 
 /**
  * Render a failing `ProofVerdict` as an indented, human-readable report (the
@@ -66,11 +67,12 @@ export async function cmdProve(args: string[]): Promise<void> {
       plan: { type: "value", required: true },
       clone: { type: "value", required: true },
       "desired-snapshot": { type: "value", required: true },
+      profile: { type: "value" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next prove --plan <plan.json> --clone <pg-url> --desired-snapshot <file>\n`,
+        `${err.message}\nUsage: pg-delta-next prove --plan <plan.json> --clone <pg-url> --desired-snapshot <file> [--profile ${PROFILE_IDS}]\n`,
       );
       process.exit(2);
     }
@@ -95,7 +97,17 @@ export async function cmdProve(args: string[]): Promise<void> {
     process.stderr.write(
       `Proving plan (${thePlan.actions.length} action(s))...\n`,
     );
-    const verdict = await provePlan(thePlan, clone.pool, desiredFb);
+    // The profile MUST match the one used to plan: it supplies the handler-aware
+    // re-extractor + baseline so the proof reconstructs the SAME managed view it
+    // diffed (otherwise operational children reappear as drift). Policy and
+    // capability fall back to the plan artifact inside provePlan.
+    const ctx = await resolveCliProfile(clone.pool, flags["profile"]);
+    const verdict = await provePlan(
+      thePlan,
+      clone.pool,
+      desiredFb,
+      ctx.proveOptions,
+    );
 
     if (verdict.ok) {
       process.stderr.write(
