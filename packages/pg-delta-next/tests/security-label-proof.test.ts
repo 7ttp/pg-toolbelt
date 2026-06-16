@@ -94,4 +94,98 @@ describe.skipIf(skipSeclabelProof)("security-label end-to-end proof", () => {
     expect(v.driftDeltas).toEqual([]);
     expect(v.ok).toBe(true);
   }, 240_000);
+
+  // One create-the-label transition per SECURITY-LABEL-supported modeled target
+  // kind (REVIEW_HANDOFF.md P1). The label must be EXTRACTED — otherwise both
+  // sides extract identically and the proof passes vacuously, which is exactly
+  // the silent-miss the rewrite must avoid. So we assert a SECURITY LABEL action
+  // was actually planned (`actions > 0`) AND it converges. event-trigger,
+  // publication, and subscription labels were the missing kinds.
+  const KIND_CASES: Array<{ name: string; setup: string; on: string }> = [
+    { name: "schema", setup: `CREATE SCHEMA sl;`, on: `SCHEMA sl` },
+    {
+      name: "view",
+      setup: `CREATE VIEW public.v AS SELECT 1 AS x;`,
+      on: `VIEW public.v`,
+    },
+    {
+      name: "matview",
+      setup: `CREATE MATERIALIZED VIEW public.mv AS SELECT 1 AS x;`,
+      on: `MATERIALIZED VIEW public.mv`,
+    },
+    {
+      name: "sequence",
+      setup: `CREATE SEQUENCE public.s;`,
+      on: `SEQUENCE public.s`,
+    },
+    {
+      name: "domain",
+      setup: `CREATE DOMAIN public.d AS integer;`,
+      on: `DOMAIN public.d`,
+    },
+    {
+      name: "type",
+      setup: `CREATE TYPE public.ty AS (a integer);`,
+      on: `TYPE public.ty`,
+    },
+    {
+      name: "function",
+      setup: `CREATE FUNCTION public.f() RETURNS integer LANGUAGE sql AS 'SELECT 1';`,
+      on: `FUNCTION public.f()`,
+    },
+    {
+      name: "procedure",
+      setup: `CREATE PROCEDURE public.p() LANGUAGE sql AS $$ SELECT 1 $$;`,
+      on: `PROCEDURE public.p()`,
+    },
+    {
+      name: "aggregate",
+      setup: `CREATE AGGREGATE public.agg(integer) (SFUNC = int4larger, STYPE = integer);`,
+      on: `AGGREGATE public.agg(integer)`,
+    },
+    {
+      name: "event-trigger",
+      setup: `CREATE FUNCTION public.etf() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN END $$;\nCREATE EVENT TRIGGER et ON ddl_command_end EXECUTE FUNCTION public.etf();`,
+      on: `EVENT TRIGGER et`,
+    },
+    {
+      name: "publication",
+      setup: `CREATE PUBLICATION pub;`,
+      on: `PUBLICATION pub`,
+    },
+  ];
+
+  for (const c of KIND_CASES) {
+    test(
+      `a ${c.name} security label is extracted, planned, and converges`,
+      async () => {
+        const v = await proveTransition(
+          `kind_${c.name.replace(/-/g, "_")}`,
+          c.setup,
+          `${c.setup}\nSECURITY LABEL FOR 'dummy' ON ${c.on} IS 'secret';`,
+        );
+        expect(v.actions).toBeGreaterThan(0); // not silently dropped
+        expect(v.applyError).toBeUndefined();
+        expect(v.driftDeltas).toEqual([]);
+        expect(v.ok).toBe(true);
+      },
+      240_000,
+    );
+  }
+
+  test("a label on an unsupported target is reported, never silently dropped", async () => {
+    const cluster = await seclabelCluster();
+    const db = await cluster.createDb("sl_unresolved");
+    dbs.push(db);
+    // LANGUAGE is a valid SECURITY LABEL target but an unmodeled engine kind, so
+    // the label cannot resolve to a managed stable id. It must surface as a
+    // diagnostic, not vanish (a vanished label lets the proof pass vacuously).
+    await db.pool.query(
+      `SECURITY LABEL FOR 'dummy' ON LANGUAGE plpgsql IS 'secret';`,
+    );
+    const { diagnostics } = await extract(db.pool);
+    expect(
+      diagnostics.some((d) => d.code === "unresolved_security_label"),
+    ).toBe(true);
+  }, 240_000);
 });
