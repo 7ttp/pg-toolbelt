@@ -13,8 +13,10 @@ materialized view, function, procedure, aggregate, trigger, policy, rewrite
 rule, event trigger, domain, enum / composite / range type, collation,
 publication, subscription, FDW, server, user mapping, foreign table.
 
-Global satellite facts (one rule each, any target kind): comment, ACL
-(acldefault-normalized), security label.
+Global satellite facts (one rule each): comment (any COMMENT-addressable target),
+ACL (acldefault-normalized, per grantable object), security label (every
+SECURITY-LABEL-addressable *modeled* target — see the security-label scope note
+below; an addressable-but-unmodeled label is diagnosed, never silently dropped).
 
 ### Scope notes (where a family is partially scoped)
 
@@ -25,7 +27,7 @@ Most families are fully modeled end-to-end. The cases worth calling out — so
 |---|---|---|---|
 | Constraints | table + domain + foreign-table CHECK | yes | foreign tables carry only CHECK (no PK/FK/UNIQUE/EXCLUSION); serialized via `ALTER FOREIGN TABLE` |
 | Foreign tables | yes (columns, options, local CHECK) | yes | inherit/partition-of foreign tables out of scope |
-| Security labels | yes (`SECURITY LABEL`) | yes | needs a provider; CI uses the `dummy_seclabel` image |
+| Security labels | yes (`SECURITY LABEL`) | yes | needs a provider; CI uses the `dummy_seclabel` image. See the dedicated scope note below for which targets are supported / diagnosed / out of scope |
 | Extension members | observed via `memberOfExtension` edges | projected out by default | sub-entity member families use the extract-time anti-join (tier-4-deferrals.md) |
 | Not modeled | — | — | casts, operators (class/family), text-search, statistics, transforms, user languages: **detected + reported** as `unmodeled_kind`, never silently dropped |
 
@@ -70,7 +72,7 @@ that would fail at apply.
 - **Security labels** — extraction (`pg_seclabel` / `pg_shseclabel`), the
   `securityLabel` rule, and rendering are implemented and unit-proven
   (`src/plan/security-label.test.ts`). The create / change-in-place / drop
-  cycle is now also proven **end-to-end** (`tests/security-label-proof.test.ts`)
+  cycle is proven **end-to-end** (`tests/security-label-proof.test.ts`)
   against a `postgres:<major>-alpine` image with the `dummy_seclabel` test
   module compiled in and preloaded (`tests/dummy-seclabel.Dockerfile`,
   `tests/containers.ts::seclabelCluster`). The `dummy` provider stores labels
@@ -80,6 +82,24 @@ that would fail at apply.
   sandboxes that cannot reach the Alpine / GitHub CDNs at build time. The main
   corpus stays on stock `postgres:*-alpine` (label catalogs are empty there, so
   it is unaffected); a CI prebuild of the image is a possible follow-up.
+
+  Three tiers of label TARGET (verified on PG17 with the dummy provider —
+  `src/extract/security-labels.ts`):
+  - **Supported** (extracted, planned, proven per kind in
+    `tests/security-label-proof.test.ts`): table, view, materialized view,
+    sequence, foreign table, column, schema, type, domain, function, procedure,
+    aggregate, role, event trigger, publication, subscription.
+  - **Deliberately unsupported but DIAGNOSED**: a valid SECURITY LABEL target
+    that the engine does not model — `LANGUAGE`, `LARGE OBJECT`, `DATABASE`,
+    `TABLESPACE`. A label on one of these surfaces an `unresolved_security_label`
+    warning (escalated to a hard stop by `--strict-coverage`) instead of being
+    silently dropped — the failure mode that would otherwise let a proof pass
+    vacuously.
+  - **Not addressable at all** (so a label can never exist): index, collation,
+    foreign data wrapper, foreign server, constraint, trigger, policy, rule.
+    PostgreSQL rejects `SECURITY LABEL ON …` for these object types
+    ("security labels are not supported for this type of object"), so they
+    cannot appear in `pg_seclabel`.
 
 ## Not modeled (deliberate) — but DETECTED, never silently missed
 

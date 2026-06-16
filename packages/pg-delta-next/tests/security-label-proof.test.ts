@@ -156,21 +156,17 @@ describe.skipIf(skipSeclabelProof)("security-label end-to-end proof", () => {
   ];
 
   for (const c of KIND_CASES) {
-    test(
-      `a ${c.name} security label is extracted, planned, and converges`,
-      async () => {
-        const v = await proveTransition(
-          `kind_${c.name.replace(/-/g, "_")}`,
-          c.setup,
-          `${c.setup}\nSECURITY LABEL FOR 'dummy' ON ${c.on} IS 'secret';`,
-        );
-        expect(v.actions).toBeGreaterThan(0); // not silently dropped
-        expect(v.applyError).toBeUndefined();
-        expect(v.driftDeltas).toEqual([]);
-        expect(v.ok).toBe(true);
-      },
-      240_000,
-    );
+    test(`a ${c.name} security label is extracted, planned, and converges`, async () => {
+      const v = await proveTransition(
+        `kind_${c.name.replace(/-/g, "_")}`,
+        c.setup,
+        `${c.setup}\nSECURITY LABEL FOR 'dummy' ON ${c.on} IS 'secret';`,
+      );
+      expect(v.actions).toBeGreaterThan(0); // not silently dropped
+      expect(v.applyError).toBeUndefined();
+      expect(v.driftDeltas).toEqual([]);
+      expect(v.ok).toBe(true);
+    }, 240_000);
   }
 
   test("a label on an unsupported target is reported, never silently dropped", async () => {
