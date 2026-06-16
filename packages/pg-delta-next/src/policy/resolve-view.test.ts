@@ -105,6 +105,38 @@ describe("resolveView — fact-level scope projection", () => {
     expect(viaResolve.get(schema("public"))).toBeDefined();
   });
 
+  test("managedBy facts are projected out (no policy) — single projection point", () => {
+    // P0: resolveView must be the single projection point for BOTH provenance
+    // kinds. Operationally-managed objects (pg_partman children) carry a
+    // `managedBy` edge and must drop out of the diffed view exactly like
+    // extension members, otherwise the default plan path drops them as drift.
+    const child = table("public", "events_p20260101");
+    const childCol: StableId = {
+      kind: "column",
+      schema: "public",
+      table: "events_p20260101",
+      name: "id",
+    };
+    const fb = buildFactBase(
+      [
+        f(schema("public")),
+        f(ext("pg_partman")),
+        f(table("public", "events"), { partitioned: true }),
+        f(child, { partitioned: false }),
+        { id: childCol, parent: child, payload: { type: "integer" } },
+      ],
+      [
+        { from: child, to: ext("pg_partman"), kind: "managedBy" },
+        { from: child, to: table("public", "events"), kind: "depends" },
+      ],
+    );
+    const view = resolveView(fb, undefined);
+    expect(view.get(child)).toBeUndefined(); // managed child removed
+    expect(view.get(childCol)).toBeUndefined(); // descendant pruned too
+    expect(view.get(table("public", "events"))).toBeDefined(); // parent survives
+    expect(view.get(ext("pg_partman"))).toBeDefined();
+  });
+
   test("the { owner } predicate resolves via the owner edge (move 2)", () => {
     // owner left the payload; an { owner } scope rule must match through the
     // `owner` edge (object --owner--> role). This is the Supabase Rule 6 path.

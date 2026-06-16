@@ -742,12 +742,14 @@ function factScopeExcluded(
 }
 
 /**
- * Resolve the managed VIEW that the engine diffs: extension members are always
- * projected out (provenance), then the policy's scope (non-`verb`) rules remove
- * the facts they exclude — at the FACT level, on both sides and the proof
- * re-extract, so `plan == prove == run` holds by construction. `verb` rules are
- * left to the delta-level filter (filterDeltas). With no policy this is exactly
- * `excludeExtensionMembers`, so the corpus path is unchanged.
+ * Resolve the managed VIEW that the engine diffs: extension members and
+ * operationally-managed objects are always projected out (provenance —
+ * `memberOfExtension` then `managedBy`), then the policy's scope (non-`verb`)
+ * rules remove the facts they exclude — at the FACT level, on both sides and the
+ * proof re-extract, so `plan == prove == run` holds by construction. `verb` rules
+ * are left to the delta-level filter (filterDeltas). With no policy and no
+ * provenance edges this is the identity projection, so the corpus path is
+ * unchanged. This is the SINGLE projection point for the managed view.
  */
 export function resolveView(
   fb: FactBase,
@@ -761,6 +763,14 @@ export function resolveView(
   // extension-member / managed-object exclusion → the proof stays honest.
   let base = baseline ? subtractBaseline(fb, baseline) : fb;
   base = excludeByProvenance(base, "memberOfExtension");
+  // managed-object projection (P0): objects a stateful extension created
+  // operationally (pg_partman children, pgmq queue tables) carry a `managedBy`
+  // edge from a handler's snapshot-bound capture. They are projected out exactly
+  // like extension members so the default plan/prove/apply path never diffs them
+  // as drift (CLI-1555). Unconditional: with bare extraction there are no
+  // `managedBy` edges, so this is a no-op (corpus path unchanged). resolveView is
+  // thus the SINGLE projection point — callers no longer compose `excludeManaged`.
+  base = excludeByProvenance(base, "managedBy");
   // capability restriction (move 6): project out facts whose action the applier
   // cannot execute. Additive; default unrestricted. FDW ACLs are superuser-only
   // GRANTs and a leaf fact, so they project out cleanly. (The owner residue is
