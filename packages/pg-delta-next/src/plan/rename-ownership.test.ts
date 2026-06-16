@@ -252,3 +252,206 @@ describe("role rename carries role-name-bearing facts (review P2)", () => {
     ).toHaveLength(0);
   });
 });
+
+describe("role rename carries role-name-bearing facts with CHANGED payloads (review P2, fourth)", () => {
+  // PostgreSQL carries the role-referencing fact's IDENTITY through the rename
+  // by OID; only the payload mutation needs DDL, applied to the post-rename id.
+  // The planner must not tear down the old-name fact and recreate the new-name
+  // one (extra DDL, REVOKE … CASCADE, transient privilege churn).
+  const grp: StableId = { kind: "role", name: "grp" };
+
+  test("membership.admin false→true: GRANT WITH ADMIN OPTION on r2, no REVOKE … CASCADE", () => {
+    const source = buildFactBase(
+      [
+        { id: grp, payload: rolePayload(false) },
+        { id: role1, payload: rolePayload(false) },
+        {
+          id: { kind: "membership", role: "grp", member: "r1" },
+          payload: { admin: false },
+        },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: grp, payload: rolePayload(false) },
+        { id: role2, payload: rolePayload(false) },
+        {
+          id: { kind: "membership", role: "grp", member: "r2" },
+          payload: { admin: true },
+        },
+      ],
+      [],
+    );
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    const sql = p.actions.map((a) => a.sql);
+    expect(sql.some((s) => s.includes('ALTER ROLE "r1" RENAME TO "r2"'))).toBe(
+      true,
+    );
+    expect(sql.some((s) => s === 'GRANT "grp" TO "r2" WITH ADMIN OPTION')).toBe(
+      true,
+    );
+    // the old-name teardown (with CASCADE) must be gone
+    expect(sql.some((s) => s.includes("CASCADE"))).toBe(false);
+    expect(sql.some((s) => s.includes('FROM "r1"'))).toBe(false);
+  });
+
+  test("membership.admin true→false: REVOKE ADMIN OPTION on r2, no drop/recreate", () => {
+    const source = buildFactBase(
+      [
+        { id: grp, payload: rolePayload(false) },
+        { id: role1, payload: rolePayload(false) },
+        {
+          id: { kind: "membership", role: "grp", member: "r1" },
+          payload: { admin: true },
+        },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: grp, payload: rolePayload(false) },
+        { id: role2, payload: rolePayload(false) },
+        {
+          id: { kind: "membership", role: "grp", member: "r2" },
+          payload: { admin: false },
+        },
+      ],
+      [],
+    );
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    const sql = p.actions.map((a) => a.sql);
+    expect(sql.some((s) => s.includes('ALTER ROLE "r1" RENAME TO "r2"'))).toBe(
+      true,
+    );
+    expect(
+      sql.some((s) => s === 'REVOKE ADMIN OPTION FOR "grp" FROM "r2"'),
+    ).toBe(true);
+    expect(sql.some((s) => s.includes("CASCADE"))).toBe(false);
+  });
+
+  test("userMapping.options change: ALTER USER MAPPING on r2, no DROP/CREATE USER MAPPING", () => {
+    const srv: StableId = { kind: "server", name: "srv" };
+    const um1: StableId = { kind: "userMapping", server: "srv", role: "r1" };
+    const um2: StableId = { kind: "userMapping", server: "srv", role: "r2" };
+    const source = buildFactBase(
+      [
+        { id: role1, payload: rolePayload(false) },
+        { id: srv, payload: { fdw: "postgres_fdw", options: [] } },
+        { id: um1, parent: srv, payload: { options: ["a=b"] } },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: role2, payload: rolePayload(false) },
+        { id: srv, payload: { fdw: "postgres_fdw", options: [] } },
+        { id: um2, parent: srv, payload: { options: ["a=c"] } },
+      ],
+      [],
+    );
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    const sql = p.actions.map((a) => a.sql);
+    expect(sql.some((s) => s.includes('ALTER ROLE "r1" RENAME TO "r2"'))).toBe(
+      true,
+    );
+    expect(
+      sql.some((s) => s.includes("ALTER USER MAPPING") && s.includes('"r2"')),
+    ).toBe(true);
+    expect(sql.some((s) => s.includes("DROP USER MAPPING"))).toBe(false);
+    expect(sql.some((s) => s.includes("CREATE USER MAPPING"))).toBe(false);
+  });
+
+  test("acl privilege change: no pre-rename REVOKE FROM r1; replacement targets r2", () => {
+    const table: StableId = { kind: "table", schema: "app", name: "t" };
+    const acl1: StableId = { kind: "acl", target: table, grantee: "r1" };
+    const acl2: StableId = { kind: "acl", target: table, grantee: "r2" };
+    const source = buildFactBase(
+      [
+        { id: role1, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: table, parent: schema, payload: tablePayload() },
+        {
+          id: acl1,
+          parent: table,
+          payload: { privileges: ["SELECT"], grantable: [] },
+        },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: role2, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: table, parent: schema, payload: tablePayload() },
+        {
+          id: acl2,
+          parent: table,
+          payload: { privileges: ["SELECT", "INSERT"], grantable: [] },
+        },
+      ],
+      [],
+    );
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    const sql = p.actions.map((a) => a.sql);
+    expect(sql.some((s) => s.includes('ALTER ROLE "r1" RENAME TO "r2"'))).toBe(
+      true,
+    );
+    // no pre-rename teardown against the old name
+    expect(sql.some((s) => s.includes('FROM "r1"'))).toBe(false);
+    // the new privileges are granted to the post-rename name
+    expect(sql.some((s) => s.includes("GRANT") && s.includes('TO "r2"'))).toBe(
+      true,
+    );
+  });
+
+  test("defaultPrivilege privilege removal: REVOKE+GRANT against r2 only, no FOR ROLE r1", () => {
+    const dp1: StableId = {
+      kind: "defaultPrivilege",
+      role: "r1",
+      schema: "app",
+      objtype: "r",
+      grantee: "PUBLIC",
+    };
+    const dp2: StableId = {
+      kind: "defaultPrivilege",
+      role: "r2",
+      schema: "app",
+      objtype: "r",
+      grantee: "PUBLIC",
+    };
+    const source = buildFactBase(
+      [
+        { id: role1, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: dp1, payload: { privileges: ["SELECT"], grantable: [] } },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: role2, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: dp2, payload: { privileges: ["INSERT"], grantable: [] } },
+      ],
+      [],
+    );
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    const sql = p.actions.map((a) => a.sql);
+    expect(sql.some((s) => s.includes('ALTER ROLE "r1" RENAME TO "r2"'))).toBe(
+      true,
+    );
+    // no default-privilege DDL against the old role name
+    expect(sql.some((s) => s.includes('FOR ROLE "r1"'))).toBe(false);
+    // the privilege change is applied against the post-rename role: a REVOKE ALL
+    // (so the dropped SELECT is removed) and a GRANT INSERT, both FOR ROLE r2
+    expect(
+      sql.some((s) => s.includes('FOR ROLE "r2"') && s.includes("REVOKE ALL")),
+    ).toBe(true);
+    expect(
+      sql.some(
+        (s) => s.includes('FOR ROLE "r2"') && s.includes("GRANT INSERT"),
+      ),
+    ).toBe(true);
+  });
+});

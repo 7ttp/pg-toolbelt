@@ -502,3 +502,128 @@ describe("owner edge: role rename carries default privileges (P2)", () => {
     expect(verdict.ok).toBe(true);
   }, 120_000);
 });
+
+// ---------------------------------------------------------------------------
+// Test (h): a role rename CARRIES identical role-name-bearing facts across
+// multiple catalog families at once — table ACL, role membership, and user
+// mapping (review P3b). None should churn; only the role rename is emitted.
+// ---------------------------------------------------------------------------
+
+describe("owner edge: role rename carries acl + membership + user mapping (P3b)", () => {
+  test("only ALTER ROLE rename; no GRANT/REVOKE/USER MAPPING churn; proof clean", async () => {
+    const [clusterA, clusterB] = await isolatedClusterPair();
+    const srcDb = await clusterA.createDb("carry_multi_src");
+    const dstDb = await clusterB.createDb("carry_multi_dst");
+    dbs.push(srcDb, dstDb);
+
+    const setup = (role: string) => `
+        CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+        CREATE ROLE carry_grp NOLOGIN;
+        CREATE ROLE ${role} NOLOGIN;
+        ALTER ROLE ${role} SET statement_timeout = '22446ms';
+        GRANT carry_grp TO ${role};
+        CREATE SCHEMA app;
+        CREATE TABLE app.t (id int);
+        GRANT SELECT ON app.t TO ${role};
+        CREATE SERVER carry_srv FOREIGN DATA WRAPPER postgres_fdw;
+        CREATE USER MAPPING FOR ${role} SERVER carry_srv OPTIONS (user 'alice');
+      `;
+    // setup() creates carry_grp + the renamed role on each side; carry_grp is
+    // identical on both so only the renamed role differs, and its
+    // statement_timeout config makes the rename unambiguous.
+    await srcDb.pool.query(setup("carry_r1"));
+    await dstDb.pool.query(setup("carry_r2"));
+
+    const [srcState, dstState] = await Promise.all([
+      extract(srcDb.pool),
+      extract(dstDb.pool),
+    ]);
+    const thePlan = plan(srcState.factBase, dstState.factBase, {
+      renames: "auto",
+    });
+
+    expect(
+      thePlan.actions.some(
+        (a) => a.sql.includes("ALTER ROLE") && a.sql.includes("RENAME TO"),
+      ),
+    ).toBe(true);
+    // every role-name-bearing fact is carried by OID — zero churn
+    for (const a of thePlan.actions) {
+      expect(a.sql).not.toContain("GRANT");
+      expect(a.sql).not.toContain("REVOKE");
+      expect(a.sql).not.toContain("USER MAPPING");
+    }
+
+    const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
+    expect(verdict.applyError).toBeUndefined();
+    expect(verdict.driftDeltas).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// Test (i): a role rename CARRIES a user mapping whose OPTIONS also changed —
+// the identity is carried by OID and only ALTER USER MAPPING is emitted, never
+// DROP/CREATE USER MAPPING (review P2/P3b: payload-changing live proof).
+// ---------------------------------------------------------------------------
+
+describe("owner edge: role rename + user-mapping option change → ALTER USER MAPPING (P2)", () => {
+  test("ALTER USER MAPPING on the renamed role, no drop/create; proof clean", async () => {
+    const [clusterA, clusterB] = await isolatedClusterPair();
+    const srcDb = await clusterA.createDb("carry_umopt_src");
+    const dstDb = await clusterB.createDb("carry_umopt_dst");
+    dbs.push(srcDb, dstDb);
+
+    await clusterA.adminPool
+      .query(`CREATE ROLE umopt_r1 NOLOGIN`)
+      .catch(() => {});
+    await clusterA.adminPool
+      .query(`ALTER ROLE umopt_r1 SET statement_timeout = '33557ms'`)
+      .catch(() => {});
+    await srcDb.pool.query(`
+        CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+        CREATE SERVER umopt_srv FOREIGN DATA WRAPPER postgres_fdw;
+        CREATE USER MAPPING FOR umopt_r1 SERVER umopt_srv OPTIONS (user 'alice');
+      `);
+
+    await clusterB.adminPool
+      .query(`CREATE ROLE umopt_r2 NOLOGIN`)
+      .catch(() => {});
+    await clusterB.adminPool
+      .query(`ALTER ROLE umopt_r2 SET statement_timeout = '33557ms'`)
+      .catch(() => {});
+    await dstDb.pool.query(`
+        CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+        CREATE SERVER umopt_srv FOREIGN DATA WRAPPER postgres_fdw;
+        CREATE USER MAPPING FOR umopt_r2 SERVER umopt_srv OPTIONS (user 'bob');
+      `);
+
+    const [srcState, dstState] = await Promise.all([
+      extract(srcDb.pool),
+      extract(dstDb.pool),
+    ]);
+    const thePlan = plan(srcState.factBase, dstState.factBase, {
+      renames: "auto",
+    });
+
+    expect(
+      thePlan.actions.some(
+        (a) => a.sql.includes("ALTER ROLE") && a.sql.includes("RENAME TO"),
+      ),
+    ).toBe(true);
+    expect(
+      thePlan.actions.some((a) => a.sql.includes("ALTER USER MAPPING")),
+    ).toBe(true);
+    expect(
+      thePlan.actions.some((a) => a.sql.includes("DROP USER MAPPING")),
+    ).toBe(false);
+    expect(
+      thePlan.actions.some((a) => a.sql.includes("CREATE USER MAPPING")),
+    ).toBe(false);
+
+    const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
+    expect(verdict.applyError).toBeUndefined();
+    expect(verdict.driftDeltas).toEqual([]);
+    expect(verdict.ok).toBe(true);
+  }, 120_000);
+});
