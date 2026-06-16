@@ -321,3 +321,84 @@ describe("CLI: schema export", () => {
     }
   }, 60_000);
 });
+
+// REVIEW_HANDOFF.md P1: schema export/apply must be profile-aware like `plan`,
+// instead of always using the raw view — otherwise SQL-file workflows diverge
+// from the profile-aware DB-to-DB path. These prove the `--profile` /
+// `--restrict-to-applier` flags exist and thread through extract/plan/apply.
+describe("CLI: schema profile-awareness", () => {
+  test("schema export --profile raw is accepted (raw == identity)", async () => {
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("cli_exp_profile_src");
+    try {
+      await source.pool.query(SCHEMA_SQL);
+      const outDir = join(tmpdir(), `pg-delta-next-exp-prof-${Date.now()}`);
+      mkdirSync(outDir, { recursive: true });
+      const result = await runCli([
+        "schema",
+        "export",
+        "--source",
+        source.uri,
+        "--out-dir",
+        outDir,
+        "--profile",
+        "raw",
+      ]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toContain("Exported");
+      const { existsSync } = await import("node:fs");
+      expect(
+        existsSync(join(outDir, "schemas/clitest/tables/items.sql")),
+      ).toBe(true);
+    } finally {
+      await source.drop();
+    }
+  }, 60_000);
+
+  test("schema apply --profile raw --restrict-to-applier applies SQL files", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_apply_prof_shadow");
+    const target = await cluster.createDb("cli_apply_prof_tgt");
+    try {
+      // hand-written declarative files (no serial/role cycles — those are an
+      // orthogonal export-layout concern). The point is that the profile flags
+      // thread through extraction, planning, and apply.
+      const dir = join(tmpdir(), `pg-delta-next-apply-prof-${Date.now()}`);
+      mkdirSync(dir, { recursive: true });
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(dir, "01_schema.sql"), `CREATE SCHEMA clitest;\n`);
+      writeFileSync(
+        join(dir, "02_table.sql"),
+        `CREATE TABLE clitest.items (id integer PRIMARY KEY, name text NOT NULL);\n`,
+      );
+
+      const applied = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--profile",
+        "raw",
+        "--restrict-to-applier",
+        "--renames",
+        "off",
+      ]);
+      expect({ code: applied.exitCode, stderr: applied.stderr }).toMatchObject({
+        code: 0,
+      });
+      expect(applied.stderr).toMatch(/Applied \d+ action/);
+
+      // the target now has the declared schema + table
+      const { rows } = await target.pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'clitest'`,
+      );
+      expect(rows[0]?.n).toBe(1);
+    } finally {
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 90_000);
+});
