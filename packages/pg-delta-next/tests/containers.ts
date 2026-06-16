@@ -1,9 +1,19 @@
 /**
  * Test-container manager: one shared PostgreSQL cluster (databases as the
  * isolation unit) plus a lazily started PAIR of clusters for scenarios whose
- * point is cluster-level state (roles/memberships/default privileges) —
- * those run state A and state B on different clusters, with role cleanup
- * between scenarios.
+ * point is cluster-level state (roles/memberships/default privileges) — those
+ * run state A and state B on different clusters.
+ *
+ * `isolatedClusterPair()` is a SINGLETON pair shared by every cluster-level
+ * test, and roles are cluster-global, so roles ACCUMULATE across scenarios.
+ * There is NO automatic role cleanup — `dropRolesExcept` is exposed but each
+ * caller must call it (and even then it is best-effort: a role owning objects
+ * in another still-live test database cannot be dropped until that database is
+ * gone). The established pattern for role-heavy tests instead avoids pollution
+ * by construction: use distinctive role names/configs so rename detection stays
+ * unambiguous, and prove plans that drop/rename roles against the SACRIFICIAL
+ * source database directly (never a clone — a clone leaves the original source
+ * pinning the old role; see owner-edge.test.ts).
  */
 import {
   GenericContainer,

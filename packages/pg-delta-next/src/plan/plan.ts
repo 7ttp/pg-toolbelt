@@ -31,6 +31,11 @@ import {
   type RenameMode,
 } from "./renames.ts";
 import {
+  buildRoleRenameMap,
+  computeRoleRenameCarry,
+  ownerEdgeKey,
+} from "./role-rename-carry.ts";
+import {
   KNOWN_PARAMS,
   rulesFor,
   type ActionSpec,
@@ -256,6 +261,24 @@ export function plan(
         added.delete(encodeId(id));
       acceptedRenames.push({ from: fromFact, to: toFact });
     }
+  }
+
+  // ── role-rename carry (role-rename-carry.ts) ──────────────────────────
+  // PostgreSQL carries every role-name-bearing fact through `ALTER ROLE …
+  // RENAME` by OID. The diff still surfaces those as remove/add (or owner
+  // unlink/link) pairs differing only by the renamed name; this Module decides,
+  // in ONE place, which the rename carries so emission re-issues no DDL for
+  // them. carriedFactKeys (acl/membership/userMapping/defaultPrivilege) are
+  // cancelled from the worklists here; carriedOwnerLinks are skipped in the
+  // owner-edge loop below (where the role-only-rename owner cycle lived).
+  const roleRenameMap = buildRoleRenameMap(acceptedRenames);
+  const { carriedFactKeys, carriedOwnerLinks } = computeRoleRenameCarry(
+    deltas,
+    roleRenameMap,
+  );
+  for (const key of carriedFactKeys) {
+    removed.delete(key);
+    added.delete(key);
   }
 
   // ── classify set-deltas: in-place alter vs replace ────────────────────
@@ -667,19 +690,10 @@ export function plan(
       if (delta.verb !== "unlink" || delta.edge.kind !== "owner") continue;
       oldOwnerByFact.set(encodeId(delta.edge.from), delta.edge.to);
     }
-    // An accepted ROLE rename moves an owner's name: `old → new`. A table owned
-    // by `old` and renamed alongside keeps the SAME owner OID, which surfaces in
-    // `desired` as `new` — so the owner is CARRIED by the two renames, not
-    // changed. Map source role name → dest role name to recognize that.
-    const roleRenameMap = new Map<string, string>();
-    for (const { from, to } of acceptedRenames) {
-      if (from.id.kind === "role" && to.id.kind === "role") {
-        roleRenameMap.set(
-          (from.id as { name: string }).name,
-          (to.id as { name: string }).name,
-        );
-      }
-    }
+    // `roleRenameMap` (source role name → dest) is built once above and reused:
+    // a table owned by `old` and renamed alongside keeps the SAME owner OID,
+    // surfacing in `desired` as `new` — so the owner is CARRIED by the two
+    // renames, not changed.
     // Accepted renames carry ownership: `ALTER … RENAME` never changes the
     // owner, so the renamed subtree's owner edge resurfaces as a fresh link in
     // the desired base even when nothing changed. Map each renamed-to id to the
@@ -733,8 +747,15 @@ export function plan(
       const newRoleId = delta.edge.to;
       if (newRoleId.kind !== "role") continue;
       const roleName = (newRoleId as { kind: "role"; name: string }).name;
-      // ownership carried unchanged by an accepted rename — no action needed
+      // ownership carried unchanged by an accepted OBJECT rename (the object id
+      // changed; renamedOwner maps it through any role rename) — no action
       if (renamedOwner.get(objKey) === roleName) continue;
+      // ownership carried by an accepted ROLE rename on a STABLE object: the
+      // owner edge relinks r1→r2 on the same id, but PostgreSQL carries it by
+      // OID. Skip BEFORE the capability check — there is no owner action to
+      // authorize (third follow-up review P1: role-only rename cycle / false
+      // capability failure). The general role-rename carry seam decided this.
+      if (carriedOwnerLinks.has(ownerEdgeKey(objId, newRoleId))) continue;
       // Owner residue (move 6): `ALTER … OWNER TO R` requires the applier to be
       // a superuser or a member of R. If a capability is supplied and the
       // applier cannot, fail fast at plan time with an actionable message —
