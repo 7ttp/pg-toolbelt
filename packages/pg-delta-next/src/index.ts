@@ -88,3 +88,18 @@ export {
   resolveBaseline,
 } from "./policy/baseline.ts";
 export { supabasePolicy } from "./policy/supabase.ts";
+
+// ── integrations (the safe, profile-scoped path) ─────────────────────────────
+// The headline managed-view API: resolve a profile against a source pool, then
+// route extract / plan / prove / apply through the resolved option bundles so
+// they reconstruct the same view (plan == prove == apply). The full surface
+// (handlers, capability probing, custom-profile building blocks) lives on the
+// `@supabase/pg-delta-next/integrations` subpath.
+export {
+  resolveProfile,
+  rawProfile,
+  supabaseProfile,
+  type IntegrationProfile,
+  type ResolvedProfile,
+  type ResolveProfileOptions,
+} from "./integrations/index.ts";

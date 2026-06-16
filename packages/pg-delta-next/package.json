@@ -15,7 +15,8 @@
     "./proof": "./src/proof/prove.ts",
     "./frontends": "./src/frontends/index.ts",
     "./core": "./src/core/index.ts",
-    "./policy": "./src/policy/policy.ts"
+    "./policy": "./src/policy/policy.ts",
+    "./integrations": "./src/integrations/index.ts"
   },
   "scripts": {
     "check-types": "tsc --noEmit",

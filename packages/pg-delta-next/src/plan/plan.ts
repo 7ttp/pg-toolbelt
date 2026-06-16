@@ -138,8 +138,10 @@ export interface PlanOptions {
    *  never change (asserted by the compaction suite). Default: true. */
   compact?: boolean;
   /** applier capability (move 6): operations the applier cannot execute (e.g.
-   *  FDW ACLs for a non-superuser) are projected out of the view. Probe with
-   *  probeApplierCapability(pool). Default unrestricted. */
+   *  FDW ACLs for a non-superuser) are projected out of the view. Supplied by
+   *  the resolved profile (`resolveProfile(pool, profile, { restrictToApplier:
+   *  true })`), or probe directly with `probeApplierCapability` from
+   *  `@supabase/pg-delta-next/integrations`. Default unrestricted. */
   capability?: ApplierCapability;
 }
 

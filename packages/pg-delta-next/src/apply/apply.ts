@@ -41,6 +41,14 @@ export interface ApplyOptions {
    *  artifact. If the plan's policy declares a baseline and this is absent, the
    *  gate fails loudly rather than mis-comparing. */
   baseline?: FactBase;
+  /** how to re-extract the target for the fingerprint gate. Defaults to the core
+   *  `extract`. An integration with extension handlers MUST pass a handler-aware
+   *  re-extractor — `extract(pool, { handlers })`, which the resolved profile
+   *  supplies as `applyOptions.reextract` — so the gate emits the same
+   *  `managedBy` edges and `resolveView` reconstructs the SAME managed view the
+   *  plan was fingerprinted from; otherwise operationally-managed objects present
+   *  on the real target read as drift and reject a valid managed plan. */
+  reextract?: (pool: Pool) => Promise<{ factBase: FactBase }>;
 }
 
 interface Segment {
@@ -133,7 +141,7 @@ export async function apply(
           `gate with fingerprintGate:false if convergence was already proven.`,
       );
     }
-    const current = await extract(target);
+    const current = await (options?.reextract ?? extract)(target);
     const view = resolveView(
       current.factBase,
       thePlan.policy,
