@@ -1,14 +1,15 @@
 /**
- * Internal planner stages (Item 7 of docs/archive/hardening-plan.md).
+ * ActionGraph building blocks — the graph construction, deterministic tie-break,
+ * compaction passes, and safety report that the `finalizeActions` phase
+ * (./phases/action-graph.ts) composes. They depend only on explicit inputs plus
+ * module imports (encodeId, the rule table), never on planner-local state.
  *
- * These are the cleanly-separable phases of `plan()` — they depend only on
- * explicit inputs plus module imports (encodeId, the rule table), never on
- * `plan()`'s local mutable state. Extracting them shrinks the planner body and
- * makes each phase independently readable and testable, behind the UNCHANGED
- * public `plan()` API. The tightly-coupled core (rename cancellation, action
- * emission with its shared producer/destroyer bookkeeping, drop suppression)
- * stays in `plan()`: it is one cohesive algorithm over shared maps and splitting
- * it would thread state for no real gain.
+ * `plan()` itself is now a thin orchestrator over four named phases
+ * (./phases/{change-set,replacement-expansion,action-emitter,action-graph}.ts):
+ * the rename/role-rename cancellation, replacement expansion, and the cohesive
+ * action-emission algorithm (with its producer/destroyer bookkeeping, kept local
+ * to the ActionEmitter phase) each live behind a phase boundary, so their
+ * invariants are testable in isolation behind the UNCHANGED public `plan()` API.
  *
  * Pure refactor: the corpus + differential prove the plans are state-equivalent.
  */
