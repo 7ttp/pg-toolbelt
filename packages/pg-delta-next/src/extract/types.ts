@@ -186,14 +186,35 @@ export async function extractTypes(ctx: ExtractContext): Promise<void> {
       });
     }
   }
+  // rngmultitypid (the auto-created multirange type) is PG14+; on PG13 the
+  // column does not exist, so the multirange name degrades to NULL.
+  const major = Math.floor(
+    Number(
+      (
+        await q(`SELECT current_setting('server_version_num')::int AS num`)
+      )[0]?.["num"] ?? 0,
+    ) / 10000,
+  );
+  const multirangeExpr =
+    major >= 14
+      ? `(SELECT quote_ident(mn.nspname) || '.' || quote_ident(mt.typname)
+            FROM pg_type mt JOIN pg_namespace mn ON mn.oid = mt.typnamespace
+            WHERE mt.oid = rng.rngmultitypid)`
+      : `NULL::text`;
   for (const row of await q(`
     SELECT n.nspname AS schema, t.typname AS name, r.rolname AS owner,
            format_type(rng.rngsubtype, NULL) AS subtype,
+           -- pin SUBTYPE_OPCLASS only when it is not the subtype's default
+           -- operator class (pg_dump's rule); the default is implied by SUBTYPE
+           CASE WHEN NOT opc.opcdefault THEN
+             quote_ident(opcn.nspname) || '.' || quote_ident(opc.opcname)
+           END AS subtype_opclass,
            CASE WHEN rng.rngcollation <> 0 THEN (
              SELECT quote_ident(cn.nspname) || '.' || quote_ident(co.collname)
              FROM pg_collation co JOIN pg_namespace cn ON cn.oid = co.collnamespace
              WHERE co.oid = rng.rngcollation) END AS collation,
            CASE WHEN rng.rngsubdiff <> 0 THEN rng.rngsubdiff::regproc::text END AS subtype_diff,
+           ${multirangeExpr} AS multirange_type_name,
            obj_description(t.oid, 'pg_type') AS comment,
            ${aclJson("t.typacl", "T", "t.typowner")} AS acl,
            ${memberExtensionExpr("pg_type", "t.oid")} AS ext_member_of
@@ -201,6 +222,8 @@ export async function extractTypes(ctx: ExtractContext): Promise<void> {
     JOIN pg_type t ON t.oid = rng.rngtypid
     JOIN pg_namespace n ON n.oid = t.typnamespace
     JOIN pg_roles r ON r.oid = t.typowner
+    JOIN pg_opclass opc ON opc.oid = rng.rngsubopc
+    JOIN pg_namespace opcn ON opcn.oid = opc.opcnamespace
     WHERE t.typtype = 'r' AND ${USER_SCHEMA_FILTER}
     ORDER BY n.nspname, t.typname`)) {
     const id: StableId = {
@@ -215,12 +238,20 @@ export async function extractTypes(ctx: ExtractContext): Promise<void> {
         payload: {
           variant: "range",
           subtype: String(row["subtype"]),
+          subtypeOpclass:
+            row["subtype_opclass"] == null
+              ? null
+              : (row["subtype_opclass"] as string),
           collation:
             row["collation"] == null ? null : (row["collation"] as string),
           subtypeDiff:
             row["subtype_diff"] == null
               ? null
               : (row["subtype_diff"] as string),
+          multirangeTypeName:
+            row["multirange_type_name"] == null
+              ? null
+              : (row["multirange_type_name"] as string),
         },
       },
       row,

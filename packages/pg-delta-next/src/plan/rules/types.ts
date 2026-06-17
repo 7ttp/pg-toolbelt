@@ -91,10 +91,15 @@ export const typeRules: Record<string, KindRules> = {
         sql = `CREATE TYPE ${relName} AS (${attrs.join(", ")})`;
       } else {
         const parts = [`SUBTYPE = ${str(p(fact, "subtype"))}`];
+        const opclass = p(fact, "subtypeOpclass");
+        if (opclass != null) parts.push(`SUBTYPE_OPCLASS = ${str(opclass)}`);
         const collation = p(fact, "collation");
         if (collation != null) parts.push(`COLLATION = ${str(collation)}`);
         const diff = p(fact, "subtypeDiff");
         if (diff != null) parts.push(`SUBTYPE_DIFF = ${str(diff)}`);
+        const multirange = p(fact, "multirangeTypeName");
+        if (multirange != null)
+          parts.push(`MULTIRANGE_TYPE_NAME = ${str(multirange)}`);
         sql = `CREATE TYPE ${relName} AS RANGE (${parts.join(", ")})`;
       }
       return [
@@ -220,7 +225,9 @@ export const typeRules: Record<string, KindRules> = {
           ),
       },
       subtype: "replace",
+      subtypeOpclass: "replace",
       subtypeDiff: "replace",
+      multirangeTypeName: "replace",
       collation: "replace",
       variant: "replace",
     },
