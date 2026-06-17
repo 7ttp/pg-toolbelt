@@ -779,10 +779,8 @@ cutover). There are no byte-compatibility gates anywhere — every stage
 ships behind proof-based gates only. Repository discipline (changesets,
 RED→GREEN regressions) applies as usual.
 
-Each stage has a detailed implementation document —
-[stage-00-test-suite.md](../archive/stage-00-test-suite.md) through
-[stage-10-cutover.md](../archive/stage-10-cutover.md) — covering deliverables,
-old-codebase mining maps, pitfalls, and the gate in checkable form.
+Each stage's build — deliverables, old-codebase mining maps, pitfalls, and the
+gate in checkable form — is recorded in [the build log](../build-log.md).
 
 | # | Stage | Builds | Gate |
 |---|---|---|---|
@@ -930,7 +928,7 @@ code.
   the cutover parity bar (§7). Entries (a)–(e) above predate this and any
   in-place-migration framing in them is superseded.
 - **2026-06-12 (g)** — Per-stage implementation documents authored
-  (`docs/stage-00-test-suite.md` … `docs/stage-10-cutover.md`), and the
+  (since consolidated into [the build log](../build-log.md)), and the
   path gained **stage 0** at the maintainer's suggestion: the test suite is
   built first — corpus ported from the existing integration tests, target
   API stubs, old-engine baselines — with one refinement: red must mean

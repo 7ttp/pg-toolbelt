@@ -1,9 +1,8 @@
 # Extension intent: diffing stateful extensions (pgmq, pg_cron, pg_partman)
 
 - **Status**: Feature design — extends `target-architecture.md`; does **not**
-  amend its invariants. Implements the substrate that
-  `pg-delta-next-linear-assessment.md` §1 identified as the one genuine design
-  gap.
+  amend its invariants. Implements the substrate that the Linear triage (see
+  [the build log](../build-log.md)) identified as the one genuine design gap.
 - **Date**: 2026-06-13 (rev. b — optimized to a single fact base; see §10c)
 - **Relates to**: CLI-1385 (parent RFC), CLI-1591 / CLI-1555 (pg_partman),
   CLI-341 (pg_cron), CLI-1430 (per-extension intent matrix), CLI-1431

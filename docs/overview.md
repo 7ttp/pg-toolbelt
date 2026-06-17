@@ -252,9 +252,9 @@ parser into the trusted path. PostgreSQL does the elaboration.
 **It resolves most known issues by design.** Of **134 tracked issues** in the
 diffing-2.0 project, roughly **90 are resolved by construction, by the corpus, or
 by policy** rather than by porting individual fixes — the architecture dissolves
-whole classes of bug. See [archive/linear-assessment.md](archive/linear-assessment.md).
+whole classes of bug. See [build-log.md](build-log.md).
 (An independent readiness review flagged five further gaps; all five have since
-shipped — see [archive/v1-readiness-review.md](archive/v1-readiness-review.md).)
+shipped — see [build-log.md](build-log.md).)
 
 ---
 
@@ -288,7 +288,7 @@ dominated by the PostgreSQL driver buffering result sets, and is **comparable to
 the old engine** (the old engine peaked ~185 MB on the same catalog). Both
 materialize catalogs fully, so both scale roughly linearly; a streaming,
 *O(changes)* diff is the next memory item on the roadmap
-([roadmap/tier-3-extract-memory.md](roadmap/tier-3-extract-memory.md)). A
+([roadmap/post-v1.md](roadmap/post-v1.md)). A
 new `extract()` statement-timeout budget already turns a runaway query on a
 pathological schema into an actionable diagnostic instead of a hang.
 
@@ -308,10 +308,10 @@ revisit):
 
 | Not yet | Why it's safe | Where |
 |---|---|---|
-| *Model* rare kinds (casts, operators, text-search, statistics, languages, transforms) | They are **detected and reported**, never silently dropped; modeling is demand-driven | [COVERAGE.md](../packages/pg-delta-next/COVERAGE.md), [roadmap/tier-4-deferrals.md](roadmap/tier-4-deferrals.md) |
-| Extension-intent **Phase B** (replay extension objects on rebuild) | Phase A (don't-drop) ships; replay is blocked on a declarative-format decision | [roadmap/tier-1-extension-intent-phase-b.md](roadmap/tier-1-extension-intent-phase-b.md) |
-| Parallel snapshot extraction | Re-profiled: < 2× win for high refactor risk | [roadmap/tier-3-extract-depends-perf.md](roadmap/tier-3-extract-depends-perf.md) |
-| Stage-10 cutover (naming, deprecation, migration guide) | Sequenced after v1 + performance | [roadmap/tier-2-stage-10-cutover.md](roadmap/tier-2-stage-10-cutover.md) |
+| *Model* rare kinds (casts, operators, text-search, statistics, languages, transforms) | They are **detected and reported**, never silently dropped; modeling is demand-driven | [COVERAGE.md](../packages/pg-delta-next/COVERAGE.md), [roadmap/post-v1.md](roadmap/post-v1.md) |
+| Extension-intent **Phase B** (replay extension objects on rebuild) | Phase A (don't-drop) ships; replay is blocked on a declarative-format decision | [roadmap/extension-intent-phase-b.md](roadmap/extension-intent-phase-b.md) |
+| Parallel snapshot extraction | Re-profiled: < 2× win for high refactor risk | [roadmap/post-v1.md](roadmap/post-v1.md) |
+| Stage-10 cutover (naming, deprecation, migration guide) | Sequenced after v1 + performance | [roadmap/post-v1.md](roadmap/post-v1.md) |
 
 Consumers migrate once, at the cutover parity bar: the public surface stays the
 `createPlan` / `applyPlan` facade, on a new major, with a migration guide.
@@ -322,10 +322,12 @@ Consumers migrate once, at the cutover parity bar: the public surface stays the
 
 | You want… | Read |
 |---|---|
+| To use it (CLI + programmatic API) | [getting-started.md](getting-started.md) |
+| How it works, concept-first | [architecture/README.md](architecture/README.md) |
 | The full design rationale (the north star) | [architecture/target-architecture.md](architecture/target-architecture.md) |
 | How scope / ownership / capability enter the engine | [architecture/managed-view-architecture.md](architecture/managed-view-architecture.md) |
 | How stateful extensions (pgmq, pg_cron, pg_partman) are handled | [architecture/extension-intent.md](architecture/extension-intent.md) |
-| The performance work (shipped) and memory roadmap | [roadmap/tier-3-extract-depends-perf.md](roadmap/tier-3-extract-depends-perf.md), [roadmap/tier-3-extract-memory.md](roadmap/tier-3-extract-memory.md) |
+| The performance work (shipped) and memory roadmap | [build-log.md](build-log.md), [roadmap/post-v1.md](roadmap/post-v1.md) |
 | What's left before cutting v1 | [roadmap/v1.md](roadmap/v1.md) and [roadmap/README.md](roadmap/README.md) |
 | What the engine models / deliberately excludes | [../packages/pg-delta-next/COVERAGE.md](../packages/pg-delta-next/COVERAGE.md) |
-| How it was built, stage by stage | [archive/](archive/) |
+| How it was built and reviewed | [build-log.md](build-log.md) |

@@ -1,78 +1,61 @@
-# pg-toolbelt docs
+# pg-delta-next docs
 
-Documentation for the `pg-delta` schema-diff engine and its clean-room rebuild,
-`pg-delta-next`. **Start with the overview, then follow the path that fits you.**
+`pg-delta-next` compares two PostgreSQL schemas and emits a migration to turn one
+into the other — then **proves** that migration converges, with your data intact,
+before you trust it. It's a clean-room rebuild of `pg-delta` on one idea: *let
+PostgreSQL be the only thing that understands PostgreSQL.*
 
-## Start here
+**Pick the path that fits you:**
 
-- **[overview.md](overview.md)** — *Why we rebuilt the engine.* The rewrite's
-  rationale, old-vs-new with diagrams and verified numbers, what it does better
-  and what's deliberately out of scope. Read this first.
+## 🚀 I want to use it
 
-## Map of the docs
+- **[getting-started.md](getting-started.md)** — the CLI and the programmatic API,
+  with copy-pasteable examples for the two workflows (diff two databases, or keep
+  your schema as `.sql` files).
+- **[../packages/pg-delta-next/COVERAGE.md](../packages/pg-delta-next/COVERAGE.md)**
+  — exactly what the engine models and what it deliberately excludes.
+
+## 🧭 I want to understand it
+
+- **[overview.md](overview.md)** — *why* the engine was rebuilt: the old engine's
+  problems, the two principles, old-vs-new with verified numbers.
+- **[architecture/README.md](architecture/README.md)** — *how* it works,
+  concept-first, for a newcomer. Links out to the deep designs below.
+
+## 🔧 I want to work on it
+
+- **[architecture/onboarding.md](architecture/onboarding.md)** — the contributor
+  map: where each pipeline stage lives, and how to add a new object kind.
+- **[architecture/target-architecture.md](architecture/target-architecture.md)** —
+  the north star: the full design, principles, and guardrails.
+- **[architecture/managed-view-architecture.md](architecture/managed-view-architecture.md)**
+  — how scope, ownership, and applier capability enter the engine.
+- **[architecture/extension-intent.md](architecture/extension-intent.md)** — how
+  stateful extensions (pgmq, pg_cron, pg_partman) are diffed without losing data.
+
+## 📋 What's done and what's next
+
+- **[build-log.md](build-log.md)** — a light record of how the engine was built,
+  hardened, and reviewed (the decision trail).
+- **[roadmap/](roadmap/)** — the path to v1 ([v1.md](roadmap/v1.md)) and the
+  post-v1 backlog ([post-v1.md](roadmap/post-v1.md)).
+
+---
+
+## Map
 
 ```
 docs/
-  overview.md          ← the rewrite, explained (start here)
-  architecture/        ← how the engine works (living design)
-  roadmap/             ← what's left to do (forward-looking)
-  archive/             ← how it was built (historical record)
+  getting-started.md   ← use it (CLI + API)
+  overview.md          ← why we rebuilt the engine
+  architecture/        ← how it works
+    README.md          ←   concept-first intro (start here)
+    target-architecture.md / managed-view-architecture.md / extension-intent.md
+    onboarding.md      ←   contributor map
+  build-log.md         ← how it was built (history)
+  roadmap/             ← what's left (v1, then post-v1)
 ```
 
-### architecture/ — living design (authoritative)
-
-How the current engine is designed. These describe the system as it is.
-
-- **[architecture/target-architecture.md](architecture/target-architecture.md)**
-  — the north star: the five sub-problems (capture, compare, synthesize, order,
-  execute), the two foundational principles, and the fact-base / generic-diff /
-  rule-table / one-graph / proof-loop design.
-- **[architecture/managed-view-architecture.md](architecture/managed-view-architecture.md)**
-  — how scope, ownership, and applier capability enter the engine through one
-  `resolveView` definition, closed under the proof loop.
-- **[architecture/extension-intent.md](architecture/extension-intent.md)** — how
-  diffing handles stateful extensions (pgmq queues, pg_cron schedules, pg_partman
-  parents) without destroying their data.
-
-### roadmap/ — forward-looking
-
-The correctness-first path to v1, then performance, then DX.
-
-- **[roadmap/v1.md](roadmap/v1.md)** — the one-page v1 roadmap (what blocks a
-  correctness-first cut, then the two post-v1 milestones).
-- **[roadmap/README.md](roadmap/README.md)** — per-item index with status legend.
-- **[roadmap/v1-evidence.md](roadmap/v1-evidence.md)** — the record to fill when
-  the v1 validation gates are run at scale (template).
-- **[roadmap/v1-unmodeled-kind-detection.md](roadmap/v1-unmodeled-kind-detection.md)**
-  — the catalog-completeness correctness item (shipped).
-- **[roadmap/extension-intent-phase-b.md](roadmap/extension-intent-phase-b.md)** —
-  the plan for replaying extension intent on a from-scratch rebuild.
-- **tier-1 … tier-4** — post-v1 detail: cutover, performance, DX/productization
-  (filtering flags, risk classification, squash/repair, baselines, …), and the
-  deliberate deferrals.
-
-### archive/ — historical record (not current)
-
-How the engine was built and reviewed — preserved for onboarding and rationale,
-not as a description of the present. See **[archive/README.md](archive/README.md)**.
-
-- `stage-00` … `stage-10` — the stage-by-stage build plan (all shipped).
-- `hardening-plan.md` — the 8 post-build hardening items (all shipped).
-- `linear-assessment.md` — triage of 134 tracked issues against the new engine.
-- `v1-readiness-review.md` — an independent readiness review.
-
-## Recommended reading orders
-
-- **"What is this and why?"** → [overview.md](overview.md).
-- **"I'm going to work on the engine"** → overview → architecture/target-architecture
-  → architecture/managed-view-architecture → the relevant `archive/stage-*` for the
-  layer you're touching → [../packages/pg-delta-next/COVERAGE.md](../packages/pg-delta-next/COVERAGE.md).
-- **"What's left / what should I pick up?"** → [roadmap/v1.md](roadmap/v1.md) →
-  [roadmap/README.md](roadmap/README.md).
-
-## Conventions
-
-- `architecture/` is authoritative and current; `archive/` is point-in-time and
-  may describe intentions that later changed — trust the code and `architecture/`
-  over `archive/` where they differ.
-- Doc links are relative; code references point into `../packages/`.
+`architecture/` is authoritative and current. `build-log.md` and `roadmap/` are,
+respectively, the past and the future — trust the code and `architecture/` where
+anything disagrees.

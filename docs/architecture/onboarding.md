@@ -1,8 +1,9 @@
 # pg-delta-next: contributor onboarding map
 
 A one-page orientation for someone touching the engine for the first time.
-Pairs with [overview.md](../overview.md) (the why) and
-[target-architecture.md](target-architecture.md) (the full design).
+Pairs with [overview.md](../overview.md) (the why), [README.md](README.md) (the
+concept-first intro), and [target-architecture.md](target-architecture.md) (the
+full design).
 
 ## The pipeline, and where each stage lives
 

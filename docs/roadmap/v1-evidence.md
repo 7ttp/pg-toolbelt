@@ -63,7 +63,7 @@ Accepted differences (reason each):
 
 ## Gate 3 — generative soak
 
-Agreed quota: **`<set the quota — was TBD in tier-2-stage-10-cutover.md>`**.
+Agreed quota: **`<set the soak quota for the v1 run>`**.
 
 ```bash
 PGDELTA_NEXT_SOAK=<quota> PGDELTA_TEST_IMAGE=postgres:17-alpine \

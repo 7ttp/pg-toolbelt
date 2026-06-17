@@ -1,9 +1,12 @@
 # @supabase/pg-delta-next
 
 Clean-room rebuild of pg-delta per [`docs/architecture/target-architecture.md`](../../docs/architecture/target-architecture.md)
-and the stage guides (`docs/archive/stage-00` … `stage-10`). **Working name** —
-final naming is a stage-10 product decision. Private until the cutover
-parity bar.
+(see [the build log](../../docs/build-log.md) for how it was built, stage by
+stage). **Working name** — final naming is a stage-10 product decision. Private
+until the cutover parity bar.
+
+> **Using it?** See [docs/getting-started.md](../../docs/getting-started.md) for
+> the CLI and the programmatic API.
 
 ## What works today (proven by the test suite)
 

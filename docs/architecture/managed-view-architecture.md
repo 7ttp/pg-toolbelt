@@ -1,10 +1,9 @@
 # The managed-view architecture (canonical)
 
 - **Status**: Canonical design. **Supersedes** the scope/serialize portions of
-  [`target-architecture.md`](target-architecture.md) §3.9, and replaces the two
-  Tier-3 stubs ([object-filtering-flags](../roadmap/tier-3-object-filtering-flags.md),
-  parts of [service-migration-baselines](../roadmap/tier-3-service-migration-baselines.md))
-  with a single model.
+  [`target-architecture.md`](target-architecture.md) §3.9, and folds the former
+  object-filtering-flags / service-migration-baselines stubs (now in the
+  [post-v1 backlog](../roadmap/post-v1.md)) into a single model.
 - **Scope**: `packages/pg-delta-next` only. This is a from-scratch design of how
   *context* (scope, ownership, applier identity) enters the engine — not a
   migration of the existing scope/serialize code.
