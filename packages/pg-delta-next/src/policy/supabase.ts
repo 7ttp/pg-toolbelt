@@ -135,6 +135,21 @@ export const SUPABASE_SYSTEM_ROLES = [
   "supabase_superuser",
 ] as const;
 
+/** Supabase platform-managed extensions: enabled by the platform image, never
+ *  declared in a user's `schemas/` files, so a declarative diff must neither
+ *  create nor drop them — the reported spurious `DROP EXTENSION pg_graphql`
+ *  (supabase/cli#5555). Deliberately conservative: user-toggleable extensions
+ *  (pg_net, pg_cron, pgmq, pgcrypto, uuid-ossp, …) are intentionally absent so
+ *  users can still manage them. The comprehensive mechanism is the committed
+ *  Supabase baseline (a v1 gate — see the `baseline` note below); this name
+ *  list mirrors SUPABASE_SYSTEM_SCHEMAS/ROLES until that lands. */
+export const SUPABASE_SYSTEM_EXTENSIONS = [
+  "pg_graphql",
+  "pg_stat_statements",
+  "pgsodium",
+  "supabase_vault",
+] as const;
+
 // ---------------------------------------------------------------------------
 // The Supabase policy
 // ---------------------------------------------------------------------------
@@ -178,6 +193,22 @@ export const supabasePolicy: Policy = {
     // INCLUDE rules (specific cases that must survive system-level exclusions)
     // Must appear BEFORE the exclude rules (first-match-wins).
     // -------------------------------------------------------------------------
+
+    // Exclude platform-managed extensions (pg_graphql, …) entirely: they are
+    // enabled by the Supabase image, never declared in user schema files, and
+    // must not be dropped when absent from the declarative source — the
+    // reported `DROP EXTENSION pg_graphql` (supabase/cli#5555). MUST precede the
+    // general extension include below (first-match-wins) so it wins for these
+    // names; all OTHER extensions still fall through to the include and stay
+    // user-declarable. No `verb` clause → also suppresses spurious version
+    // (`set`) churn on a platform extension. The robust long-term mechanism is
+    // the committed Supabase baseline (the `baseline` note below).
+    {
+      match: {
+        all: [{ kind: "extension" }, { name: [...SUPABASE_SYSTEM_EXTENSIONS] }],
+      },
+      action: "exclude",
+    },
 
     // Rule 1+2 (old rules): include extension CREATE and DROP operations.
     // Extensions are always user-declarable state on Supabase regardless of
