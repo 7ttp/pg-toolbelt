@@ -11,22 +11,25 @@ export const metadataRules: Record<string, KindRules> = {
     metadata: true,
     create: (fact) => {
       const target = (fact.id as { target: StableId }).target;
+      const opts = { domainConstraint: p(fact, "onDomain") === true };
       return [
         {
-          sql: `COMMENT ON ${commentTarget(target)} IS ${lit(str(p(fact, "text")))}`,
+          sql: `COMMENT ON ${commentTarget(target, opts)} IS ${lit(str(p(fact, "text")))}`,
         },
       ];
     },
     drop: (fact) => {
       const target = (fact.id as { target: StableId }).target;
-      return { sql: `COMMENT ON ${commentTarget(target)} IS NULL` };
+      const opts = { domainConstraint: p(fact, "onDomain") === true };
+      return { sql: `COMMENT ON ${commentTarget(target, opts)} IS NULL` };
     },
     attributes: {
       text: {
         alter: (fact, _from, to) => {
           const target = (fact.id as { target: StableId }).target;
+          const opts = { domainConstraint: p(fact, "onDomain") === true };
           return {
-            sql: `COMMENT ON ${commentTarget(target)} IS ${lit(str(to))}`,
+            sql: `COMMENT ON ${commentTarget(target, opts)} IS ${lit(str(to))}`,
           };
         },
       },

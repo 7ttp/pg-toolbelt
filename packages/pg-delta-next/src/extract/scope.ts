@@ -234,10 +234,19 @@ export function createExtractContext(
     facts.push(fact);
     const comment = row["comment"];
     if (typeof comment === "string") {
+      // a constraint on a DOMAIN needs `COMMENT ON CONSTRAINT … ON DOMAIN …`,
+      // not the table form — but commentTarget only sees the (identically
+      // shaped) constraint id and `drop` has no FactView to look up the parent.
+      // Carry the discriminator on the satellite payload so every comment
+      // callback (create / alter / drop) renders the right target.
+      const onDomain =
+        fact.id.kind === "constraint" && fact.parent?.kind === "domain";
       facts.push({
         id: { kind: "comment", target: fact.id },
         parent: fact.id,
-        payload: { text: comment },
+        payload: onDomain
+          ? { text: comment, onDomain: true }
+          : { text: comment },
       });
     }
     for (const acl of aclTargets ?? []) {

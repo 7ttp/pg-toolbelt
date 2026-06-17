@@ -2,7 +2,7 @@
 import type { StableId } from "../../core/stable-id.ts";
 import { qid, rel } from "../render.ts";
 import type { KindRules } from "../rules.ts";
-import { p, policySql, str } from "./helpers.ts";
+import { p, policySql } from "./helpers.ts";
 
 export const policyRules: Record<string, KindRules> = {
   policy: {
@@ -28,22 +28,13 @@ export const policyRules: Record<string, KindRules> = {
       };
     },
     attributes: {
-      usingExpr: {
-        alter: (fact, _from, to) => {
-          const id = fact.id as { schema: string; table: string; name: string };
-          return {
-            sql: `ALTER POLICY ${qid(id.name)} ON ${rel(id.schema, id.table)} USING (${str(to)})`,
-          };
-        },
-      },
-      checkExpr: {
-        alter: (fact, _from, to) => {
-          const id = fact.id as { schema: string; table: string; name: string };
-          return {
-            sql: `ALTER POLICY ${qid(id.name)} ON ${rel(id.schema, id.table)} WITH CHECK (${str(to)})`,
-          };
-        },
-      },
+      // USING / WITH CHECK predicates can be ADDED or REMOVED, not merely
+      // edited, and PostgreSQL offers no `ALTER POLICY … DROP USING`; an
+      // in-place ALTER would crash on the null (clause-removed) transition.
+      // Rebuild the (rebuildable) policy instead — exactly how `cmd` and
+      // `permissive` below already work, since they have no in-place ALTER.
+      usingExpr: "replace",
+      checkExpr: "replace",
       roles: {
         alter: (fact, _from, to) => {
           const id = fact.id as { schema: string; table: string; name: string };

@@ -24,6 +24,7 @@ import { join, dirname, resolve, sep } from "node:path";
 import { exportSqlFiles } from "../../frontends/export-sql-files.ts";
 import { loadSqlFiles } from "../../frontends/load-sql-files.ts";
 import { plan } from "../../plan/plan.ts";
+import { resolveView } from "../../policy/policy.ts";
 import { apply } from "../../apply/apply.ts";
 import { encodeId, parseId, type StableId } from "../../core/stable-id.ts";
 import { exitIfBlocking, printDiagnostics } from "../diagnostics.ts";
@@ -103,7 +104,19 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       strictCoverage: flags["strict-coverage"],
       action: "export",
     });
-    const files = exportSqlFiles(factBase, { layout });
+    // Export the MANAGED VIEW, not the raw extraction: with a profile
+    // (policy/capability/baseline) the exported files must match what
+    // `plan --profile` diffs, or policy-hidden schemas/roles and baseline
+    // objects would be written into the declarative source and then reappear
+    // as drift on `schema apply` (Codex review). For `raw` (no policy) this is
+    // an identity projection.
+    const view = resolveView(
+      factBase,
+      ctx.planOptions.policy,
+      ctx.planOptions.capability,
+      ctx.planOptions.baseline,
+    );
+    const files = exportSqlFiles(view, { layout });
 
     const outRoot = resolve(outDir);
     for (const file of files) {

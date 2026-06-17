@@ -21,8 +21,13 @@ export function routineSig(id: {
   return `${rel(id.schema, id.name)}(${id.args.join(", ")})`;
 }
 
-/** SQL identity phrase for COMMENT ON / GRANT targets, per target kind. */
-export function commentTarget(id: StableId): string {
+/** SQL identity phrase for COMMENT ON / GRANT targets, per target kind.
+ *  `opts.domainConstraint` selects the `ON DOMAIN …` form for a constraint that
+ *  belongs to a domain (the id shape is identical to a table constraint). */
+export function commentTarget(
+  id: StableId,
+  opts?: { domainConstraint?: boolean },
+): string {
   switch (id.kind) {
     case "schema":
       return `SCHEMA ${qid(id.name)}`;
@@ -39,7 +44,9 @@ export function commentTarget(id: StableId): string {
     case "column":
       return `COLUMN ${rel(id.schema, id.table)}.${qid(id.name)}`;
     case "constraint":
-      return `CONSTRAINT ${qid(id.name)} ON ${rel(id.schema, id.table)}`;
+      return opts?.domainConstraint
+        ? `CONSTRAINT ${qid(id.name)} ON DOMAIN ${rel(id.schema, id.table)}`
+        : `CONSTRAINT ${qid(id.name)} ON ${rel(id.schema, id.table)}`;
     case "trigger":
       return `TRIGGER ${qid(id.name)} ON ${rel(id.schema, id.table)}`;
     case "policy":
