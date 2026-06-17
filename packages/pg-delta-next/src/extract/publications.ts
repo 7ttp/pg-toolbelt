@@ -122,8 +122,14 @@ export async function extractSubscriptions(ctx: ExtractContext): Promise<void> {
     major >= 16
       ? `CASE s.substream WHEN 'p' THEN 'parallel' WHEN 't' THEN 'on' ELSE 'off' END`
       : `CASE WHEN s.substream THEN 'on' ELSE 'off' END`;
-  // run_as_owner and origin are PG16+ — NULL on older servers so the rule
-  // omits them entirely.
+  // disable_on_error and two_phase are PG15+; run_as_owner and origin are
+  // PG16+ — NULL on older servers so the rule omits them entirely. (binary and
+  // streaming are PG14+ and synchronous_commit is PG10+, so they need no gate
+  // for our supported range.)
+  const disableOnErrorExpr =
+    major >= 15 ? `s.subdisableonerr` : `NULL::boolean`;
+  const twoPhaseExpr =
+    major >= 15 ? `(s.subtwophasestate <> 'd')` : `NULL::boolean`;
   const runAsOwnerExpr = major >= 16 ? `s.subrunasowner` : `NULL::boolean`;
   const originExpr = major >= 16 ? `s.suborigin` : `NULL::text`;
   // ── subscriptions (database-local rows only) ─────────────────────────
@@ -134,8 +140,8 @@ export async function extractSubscriptions(ctx: ExtractContext): Promise<void> {
            s.subbinary AS binary,
            ${streamingExpr} AS streaming,
            s.subsynccommit AS synchronous_commit,
-           s.subdisableonerr AS disable_on_error,
-           (s.subtwophasestate <> 'd') AS two_phase,
+           ${disableOnErrorExpr} AS disable_on_error,
+           ${twoPhaseExpr} AS two_phase,
            ${runAsOwnerExpr} AS run_as_owner,
            ${originExpr} AS origin,
            obj_description(s.oid, 'pg_subscription') AS comment
@@ -157,8 +163,11 @@ export async function extractSubscriptions(ctx: ExtractContext): Promise<void> {
           binary: Boolean(row["binary"]),
           streaming: String(row["streaming"]),
           synchronousCommit: String(row["synchronous_commit"]),
-          disableOnError: Boolean(row["disable_on_error"]),
-          twoPhase: Boolean(row["two_phase"]),
+          disableOnError:
+            row["disable_on_error"] == null
+              ? null
+              : Boolean(row["disable_on_error"]),
+          twoPhase: row["two_phase"] == null ? null : Boolean(row["two_phase"]),
           runAsOwner:
             row["run_as_owner"] == null ? null : Boolean(row["run_as_owner"]),
           origin: row["origin"] == null ? null : (row["origin"] as string),
