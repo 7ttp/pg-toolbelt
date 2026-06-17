@@ -285,9 +285,24 @@ It targets only the `org.testcontainers=true` label and is age-guarded, so a run
 in flight is never touched. Good as a periodic / CI post-step. Check for leaks
 with `docker ps` (look for many idle `postgres:1[58]-alpine` containers hours/days old).
 
+**Run the corpus to validate engine/planner changes — it is cheap.** The full
+corpus (every scenario, both directions) is **~2–3 min per PG version** (e.g.
+420 cases in ~150s on `postgres:17-alpine`), not the tens of minutes an older
+note here once claimed. Any change to the diff / planner / compaction / proof
+path should be gated on a full corpus run for at least one PG version before you
+call it "no regressions" — focused suites + blast-radius reasoning are not a
+substitute, because the corpus is the only thing that proves every scenario
+still applies and converges. A cosmetic compaction change in particular fires
+across many unrelated scenarios, so reason about it, then run the corpus.
+
+```bash
+PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts
+```
+
 **Live corpus progress.** `bun test` buffers its own reporter when stdout is a
-pipe, so a piped/background corpus run (`bun test tests/engine.test.ts`) prints
-nothing until it finishes (~45 min). Set `PGDELTA_NEXT_PROGRESS=1` to stream a
+pipe, so a piped/background corpus run prints nothing until it finishes (still a
+short wait, but a background/CI run shows no interim signal). Set
+`PGDELTA_NEXT_PROGRESS=1` to stream a
 `corpus <image> [done/total pct%] PASS|FAIL <scenario>` line per scenario to
 stderr (a raw fd-2 write that bypasses the buffering). Off by default so an
 interactive TTY run keeps bun's native reporter clean.
