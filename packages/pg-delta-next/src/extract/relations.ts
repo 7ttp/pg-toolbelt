@@ -108,6 +108,17 @@ export async function extractColumns(ctx: ExtractContext): Promise<void> {
               AND d.refobjid = c.oid AND d.refobjsubid = a.attnum
               AND d.deptype = 'i' AND sc.relkind = 'S'
             LIMIT 1) AS identity_sequence,
+           (SELECT json_build_object(
+                     'increment', sq.seqincrement::text, 'start', sq.seqstart::text,
+                     'minValue', sq.seqmin::text, 'maxValue', sq.seqmax::text,
+                     'cache', sq.seqcache::text, 'cycle', sq.seqcycle)
+            FROM pg_depend d
+            JOIN pg_sequence sq ON sq.seqrelid = d.objid
+            WHERE d.classid = 'pg_class'::regclass
+              AND d.refclassid = 'pg_class'::regclass
+              AND d.refobjid = c.oid AND d.refobjsubid = a.attnum
+              AND d.deptype = 'i'
+            LIMIT 1) AS identity_options,
            NULLIF(a.attgenerated, '') AS generated,
            CASE WHEN a.attcollation <> t.typcollation THEN (
              SELECT quote_ident(cn.nspname) || '.' || quote_ident(co.collname)
@@ -154,6 +165,17 @@ export async function extractColumns(ctx: ExtractContext): Promise<void> {
                     schema: string;
                     name: string;
                   } | null,
+                  options:
+                    row["identity_options"] == null
+                      ? null
+                      : (row["identity_options"] as {
+                          increment: string;
+                          start: string;
+                          minValue: string;
+                          maxValue: string;
+                          cache: string;
+                          cycle: boolean;
+                        }),
                 },
           collation:
             row["collation"] == null ? null : (row["collation"] as string),
