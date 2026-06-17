@@ -109,11 +109,35 @@ export async function extractPublications(ctx: ExtractContext): Promise<void> {
 
 export async function extractSubscriptions(ctx: ExtractContext): Promise<void> {
   const { q, pushWithMeta, pushOwnerEdge } = ctx;
+  const major = Math.floor(
+    Number(
+      (
+        await q(`SELECT current_setting('server_version_num')::int AS num`)
+      )[0]?.["num"] ?? 0,
+    ) / 10000,
+  );
+  // substream is boolean on PG15 (on/off) and a "char" on PG16+ ('f'/'t'/'p',
+  // 'p' = parallel). Normalise to the CREATE/ALTER keyword in SQL.
+  const streamingExpr =
+    major >= 16
+      ? `CASE s.substream WHEN 'p' THEN 'parallel' WHEN 't' THEN 'on' ELSE 'off' END`
+      : `CASE WHEN s.substream THEN 'on' ELSE 'off' END`;
+  // run_as_owner and origin are PG16+ — NULL on older servers so the rule
+  // omits them entirely.
+  const runAsOwnerExpr = major >= 16 ? `s.subrunasowner` : `NULL::boolean`;
+  const originExpr = major >= 16 ? `s.suborigin` : `NULL::text`;
   // ── subscriptions (database-local rows only) ─────────────────────────
   for (const row of await q(`
     SELECT s.subname AS name, r.rolname AS owner, s.subenabled AS enabled,
            s.subconninfo AS conninfo, s.subslotname AS slot_name,
            s.subpublications::text[] AS publications,
+           s.subbinary AS binary,
+           ${streamingExpr} AS streaming,
+           s.subsynccommit AS synchronous_commit,
+           s.subdisableonerr AS disable_on_error,
+           (s.subtwophasestate <> 'd') AS two_phase,
+           ${runAsOwnerExpr} AS run_as_owner,
+           ${originExpr} AS origin,
            obj_description(s.oid, 'pg_subscription') AS comment
     FROM pg_subscription s
     JOIN pg_roles r ON r.oid = s.subowner
@@ -130,6 +154,14 @@ export async function extractSubscriptions(ctx: ExtractContext): Promise<void> {
           slotName:
             row["slot_name"] == null ? null : (row["slot_name"] as string),
           publications: (row["publications"] as string[]).map(String).sort(),
+          binary: Boolean(row["binary"]),
+          streaming: String(row["streaming"]),
+          synchronousCommit: String(row["synchronous_commit"]),
+          disableOnError: Boolean(row["disable_on_error"]),
+          twoPhase: Boolean(row["two_phase"]),
+          runAsOwner:
+            row["run_as_owner"] == null ? null : Boolean(row["run_as_owner"]),
+          origin: row["origin"] == null ? null : (row["origin"] as string),
         },
       },
       row,
