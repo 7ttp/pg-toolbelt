@@ -10,6 +10,12 @@ on:
     paths:
       - "packages/pg-delta-next/**"
 
+# Least-privilege default for GITHUB_TOKEN across every job (CodeQL): this
+# workflow only reads the checked-out repo. Widen per-job if a step ever needs
+# more.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Unit + integration (PG ${{ matrix.postgres_version }})
