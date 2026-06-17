@@ -1,7 +1,14 @@
 /** Rule definitions for views, materialized views, and rewrite rules. */
 import { qid, rel } from "../render.ts";
 import type { KindRules } from "../rules.ts";
-import { enabledPhrase, p, renameRule, str } from "./helpers.ts";
+import {
+  enabledPhrase,
+  p,
+  reloptionsAlterSpecs,
+  reloptionsWithClause,
+  renameRule,
+  str,
+} from "./helpers.ts";
 
 export const viewRules: Record<string, KindRules> = {
   view: {
@@ -17,7 +24,7 @@ export const viewRules: Record<string, KindRules> = {
       const id = fact.id as { schema: string; name: string };
       return [
         {
-          sql: `CREATE VIEW ${rel(id.schema, id.name)} AS ${str(p(fact, "def"))}`,
+          sql: `CREATE VIEW ${rel(id.schema, id.name)}${reloptionsWithClause(fact)} AS ${str(p(fact, "def"))}`,
         },
       ];
     },
@@ -31,6 +38,16 @@ export const viewRules: Record<string, KindRules> = {
     },
     attributes: {
       def: "replace",
+      reloptions: {
+        alter: (fact, from, to) => {
+          const id = fact.id as { schema: string; name: string };
+          return reloptionsAlterSpecs(
+            `ALTER VIEW ${rel(id.schema, id.name)}`,
+            from,
+            to,
+          );
+        },
+      },
     },
   },
 
@@ -47,7 +64,7 @@ export const viewRules: Record<string, KindRules> = {
       const id = fact.id as { schema: string; name: string };
       return [
         {
-          sql: `CREATE MATERIALIZED VIEW ${rel(id.schema, id.name)} AS ${str(p(fact, "def"))}`,
+          sql: `CREATE MATERIALIZED VIEW ${rel(id.schema, id.name)}${reloptionsWithClause(fact)} AS ${str(p(fact, "def"))}`,
         },
       ];
     },
@@ -64,6 +81,16 @@ export const viewRules: Record<string, KindRules> = {
     },
     attributes: {
       def: "replace",
+      reloptions: {
+        alter: (fact, from, to) => {
+          const id = fact.id as { schema: string; name: string };
+          return reloptionsAlterSpecs(
+            `ALTER MATERIALIZED VIEW ${rel(id.schema, id.name)}`,
+            from,
+            to,
+          );
+        },
+      },
     },
   },
 

@@ -12,6 +12,15 @@ import {
   USER_SCHEMA_FILTER,
 } from "./scope.ts";
 
+/** Canonicalize pg_class.reloptions (a text[] of `key=value`) to a sorted array
+ *  so the payload hash is order-independent, or null when there are none. */
+function reloptions(row: Record<string, unknown>): string[] | null {
+  const raw = row["reloptions"];
+  if (raw == null) return null;
+  const arr = (raw as string[]).slice().sort();
+  return arr.length > 0 ? arr : null;
+}
+
 export async function extractTables(ctx: ExtractContext): Promise<void> {
   const { q, pushWithMeta, pushMemberEdge, pushOwnerEdge } = ctx;
   for (const row of await q(`
@@ -24,6 +33,7 @@ export async function extractTables(ctx: ExtractContext): Promise<void> {
             JOIN pg_class ic ON ic.oid = i.indexrelid
             WHERE i.indrelid = c.oid AND i.indisreplident) AS replica_identity_index,
            CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END AS partition_key,
+           c.reloptions AS reloptions,
            pg_get_expr(c.relpartbound, c.oid) AS partition_bound,
            (SELECT json_build_object('schema', pn.nspname, 'name', pc.relname)
             FROM pg_inherits inh
@@ -69,6 +79,7 @@ export async function extractTables(ctx: ExtractContext): Promise<void> {
             row["parent_table"] == null
               ? null
               : (row["parent_table"] as { schema: string; name: string }),
+          reloptions: reloptions(row),
         },
       },
       row,
@@ -325,6 +336,7 @@ export async function extractViews(ctx: ExtractContext): Promise<void> {
     SELECT n.nspname AS schema, c.relname AS name, r.rolname AS owner,
            c.relkind AS kind,
            pg_get_viewdef(c.oid) AS def,
+           c.reloptions AS reloptions,
            obj_description(c.oid, 'pg_class') AS comment,
            ${aclJson("c.relacl", "r", "c.relowner")} AS acl,
            ${memberExtensionExpr("pg_class", "c.oid")} AS ext_member_of
@@ -342,7 +354,7 @@ export async function extractViews(ctx: ExtractContext): Promise<void> {
       {
         id,
         parent: schemaId(row["schema"]),
-        payload: { def: String(row["def"]) },
+        payload: { def: String(row["def"]), reloptions: reloptions(row) },
       },
       row,
       parseAcl(row["acl"]),

@@ -7,7 +7,7 @@
 import type { Fact } from "../../core/fact.ts";
 import type { PayloadValue } from "../../core/hash.ts";
 import { encodeId, type StableId } from "../../core/stable-id.ts";
-import { grantTarget, qid, rel } from "../render.ts";
+import { grantTarget, qid, rel, splitOption } from "../render.ts";
 import type { ActionSpec, FactView } from "../rules.ts";
 
 /** Most renames are `<ALTER prefix> RENAME TO <new name>`. */
@@ -30,6 +30,44 @@ export const str = (v: PayloadValue): string => {
 
 export function p(fact: Fact, key: string): PayloadValue {
   return fact.payload[key];
+}
+
+/** ` WITH (k=v, …)` clause from a fact's `reloptions` payload (the canonical
+ *  sorted `key=value` array captured from pg_class.reloptions), or "" when the
+ *  relation carries no storage/view options. */
+export function reloptionsWithClause(fact: Fact): string {
+  const opts = p(fact, "reloptions") as string[] | null;
+  return opts != null && opts.length > 0 ? ` WITH (${opts.join(", ")})` : "";
+}
+
+/** `<prefix> SET (…)` / `<prefix> RESET (…)` specs for a reloptions transition.
+ *  Emits SET for keys whose value was added or changed and RESET for keys that
+ *  disappeared — the in-place form for both views (security_invoker, …) and
+ *  tables (fillfactor, autovacuum_*, …) so an options-only change is no longer
+ *  invisible (it used to hash identically and plan nothing). */
+export function reloptionsAlterSpecs(
+  alterPrefix: string,
+  from: PayloadValue,
+  to: PayloadValue,
+): ActionSpec[] {
+  const fromMap = new Map((from as string[] | null)?.map(splitOption) ?? []);
+  const toMap = new Map((to as string[] | null)?.map(splitOption) ?? []);
+  const setParts: string[] = [];
+  for (const [key, value] of toMap) {
+    if (fromMap.get(key) !== value) setParts.push(`${key}=${value}`);
+  }
+  const resetKeys: string[] = [];
+  for (const key of fromMap.keys()) {
+    if (!toMap.has(key)) resetKeys.push(key);
+  }
+  const specs: ActionSpec[] = [];
+  if (setParts.length > 0) {
+    specs.push({ sql: `${alterPrefix} SET (${setParts.join(", ")})` });
+  }
+  if (resetKeys.length > 0) {
+    specs.push({ sql: `${alterPrefix} RESET (${resetKeys.join(", ")})` });
+  }
+  return specs;
 }
 
 /** true when `partial` appears in `full` in order (possibly with gaps) */

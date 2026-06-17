@@ -8,6 +8,7 @@ import {
   identityGeneration,
   identitySequenceId,
   p,
+  reloptionsAlterSpecs,
   renameRule,
   replicaIdentitySpec,
   str,
@@ -90,6 +91,14 @@ export const tableRules: Record<string, KindRules> = {
       if (replident != null && replident !== "d") {
         specs.push(replicaIdentitySpec(fact, view));
       }
+      // storage reloptions (fillfactor, autovacuum_*, …) as a SET follow-up,
+      // keeping them out of the partition/INHERITS/PARTITION BY create grammar
+      const reloptions = p(fact, "reloptions") as string[] | null;
+      if (reloptions != null && reloptions.length > 0) {
+        specs.push({
+          sql: `ALTER TABLE ${relName} SET (${reloptions.join(", ")})`,
+        });
+      }
       return specs;
     },
     drop: (fact) => {
@@ -134,6 +143,16 @@ export const tableRules: Record<string, KindRules> = {
       },
       replicaIdentityIndex: {
         alter: (fact, _from, _to, view) => replicaIdentitySpec(fact, view),
+      },
+      reloptions: {
+        alter: (fact, from, to) => {
+          const id = fact.id as { schema: string; name: string };
+          return reloptionsAlterSpecs(
+            `ALTER TABLE ${rel(id.schema, id.name)}`,
+            from,
+            to,
+          );
+        },
       },
       partitionKey: "replace",
       partitionBound: "replace",
