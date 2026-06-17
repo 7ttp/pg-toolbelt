@@ -68,8 +68,28 @@ export async function extractAggregates(ctx: ExtractContext): Promise<void> {
            a.aggkind AS agg_kind, a.aggnumdirectargs AS num_direct_args,
            a.aggtransfn::regproc::text AS sfunc,
            format_type(a.aggtranstype, NULL) AS stype,
+           a.aggtransspace AS sspace,
            CASE WHEN a.aggfinalfn <> 0 THEN a.aggfinalfn::regproc::text END AS finalfunc,
+           a.aggfinalextra AS finalfunc_extra,
+           a.aggfinalmodify AS finalfunc_modify,
+           CASE WHEN a.aggcombinefn <> 0 THEN a.aggcombinefn::regproc::text END AS combinefunc,
+           CASE WHEN a.aggserialfn <> 0 THEN a.aggserialfn::regproc::text END AS serialfunc,
+           CASE WHEN a.aggdeserialfn <> 0 THEN a.aggdeserialfn::regproc::text END AS deserialfunc,
+           CASE WHEN a.aggmtransfn <> 0 THEN a.aggmtransfn::regproc::text END AS msfunc,
+           CASE WHEN a.aggminvtransfn <> 0 THEN a.aggminvtransfn::regproc::text END AS minvfunc,
+           CASE WHEN a.aggmtranstype <> 0 THEN format_type(a.aggmtranstype, NULL) END AS mstype,
+           a.aggmtransspace AS msspace,
+           CASE WHEN a.aggmfinalfn <> 0 THEN a.aggmfinalfn::regproc::text END AS mfinalfunc,
+           a.aggmfinalextra AS mfinalfunc_extra,
+           a.aggmfinalmodify AS mfinalfunc_modify,
            a.agginitval AS initcond,
+           a.aggminitval AS minitcond,
+           CASE WHEN a.aggsortop <> 0 THEN (
+             SELECT 'OPERATOR(' || quote_ident(opn.nspname) || '.' || o.oprname || ')'
+             FROM pg_operator o
+             JOIN pg_namespace opn ON opn.oid = o.oprnamespace
+             WHERE o.oid = a.aggsortop) END AS sortop,
+           p.proparallel AS parallel,
            obj_description(p.oid, 'pg_proc') AS comment,
            ${aclJson("p.proacl", "f", "p.proowner")} AS acl,
            ${memberExtensionExpr("pg_proc", "p.oid")} AS ext_member_of
@@ -94,10 +114,34 @@ export async function extractAggregates(ctx: ExtractContext): Promise<void> {
           numDirectArgs: Number(row["num_direct_args"]),
           sfunc: String(row["sfunc"]),
           stype: String(row["stype"]),
+          sspace: Number(row["sspace"]),
           finalfunc:
             row["finalfunc"] == null ? null : (row["finalfunc"] as string),
+          finalfuncExtra: Boolean(row["finalfunc_extra"]),
+          finalfuncModify: String(row["finalfunc_modify"]),
+          combinefunc:
+            row["combinefunc"] == null ? null : (row["combinefunc"] as string),
+          serialfunc:
+            row["serialfunc"] == null ? null : (row["serialfunc"] as string),
+          deserialfunc:
+            row["deserialfunc"] == null
+              ? null
+              : (row["deserialfunc"] as string),
+          msfunc: row["msfunc"] == null ? null : (row["msfunc"] as string),
+          minvfunc:
+            row["minvfunc"] == null ? null : (row["minvfunc"] as string),
+          mstype: row["mstype"] == null ? null : (row["mstype"] as string),
+          msspace: Number(row["msspace"]),
+          mfinalfunc:
+            row["mfinalfunc"] == null ? null : (row["mfinalfunc"] as string),
+          mfinalfuncExtra: Boolean(row["mfinalfunc_extra"]),
+          mfinalfuncModify: String(row["mfinalfunc_modify"]),
           initcond:
             row["initcond"] == null ? null : (row["initcond"] as string),
+          minitcond:
+            row["minitcond"] == null ? null : (row["minitcond"] as string),
+          sortop: row["sortop"] == null ? null : (row["sortop"] as string),
+          parallel: String(row["parallel"]),
         },
       },
       row,

@@ -4,6 +4,21 @@ import { lit, qid, rel, routineSig } from "../render.ts";
 import type { KindRules } from "../rules.ts";
 import { aggSig, p, str } from "./helpers.ts";
 
+// aggfinalmodify / aggmfinalmodify → CREATE AGGREGATE keyword. 'r'
+// (READ_ONLY) is the default, so it's rendered as undefined (omitted).
+const FINALFUNC_MODIFY: Record<string, string | undefined> = {
+  r: undefined,
+  s: "SHAREABLE",
+  w: "READ_WRITE",
+};
+// pg_proc.proparallel → PARALLEL keyword. 'u' (UNSAFE) is the default and
+// is omitted.
+const PARALLEL: Record<string, string | undefined> = {
+  u: undefined,
+  s: "SAFE",
+  r: "RESTRICTED",
+};
+
 /** FUNCTION / PROCEDURE keyword from the routine's own id kind — never a
  *  payload field (the kind is part of the address, P0). */
 const routineKeyword = (fact: Fact): "FUNCTION" | "PROCEDURE" =>
@@ -54,10 +69,41 @@ export const routineRules: Record<string, KindRules> = {
         `SFUNC = ${str(p(fact, "sfunc"))}`,
         `STYPE = ${str(p(fact, "stype"))}`,
       ];
-      const finalfunc = p(fact, "finalfunc");
-      if (finalfunc != null) parts.push(`FINALFUNC = ${str(finalfunc)}`);
+      // emit `KEY = <func>` for a non-null regproc-style option
+      const fn = (key: string, clause: string): void => {
+        const v = p(fact, key);
+        if (v != null) parts.push(`${clause} = ${str(v)}`);
+      };
+      const sspace = Number(p(fact, "sspace") ?? 0);
+      if (sspace !== 0) parts.push(`SSPACE = ${sspace}`);
+      fn("finalfunc", "FINALFUNC");
+      if (p(fact, "finalfuncExtra")) parts.push("FINALFUNC_EXTRA");
+      const finalfuncModify =
+        FINALFUNC_MODIFY[str(p(fact, "finalfuncModify") ?? "r")];
+      if (finalfuncModify != null)
+        parts.push(`FINALFUNC_MODIFY = ${finalfuncModify}`);
+      fn("combinefunc", "COMBINEFUNC");
+      fn("serialfunc", "SERIALFUNC");
+      fn("deserialfunc", "DESERIALFUNC");
+      fn("msfunc", "MSFUNC");
+      fn("minvfunc", "MINVFUNC");
+      fn("mstype", "MSTYPE");
+      const msspace = Number(p(fact, "msspace") ?? 0);
+      if (msspace !== 0) parts.push(`MSSPACE = ${msspace}`);
+      fn("mfinalfunc", "MFINALFUNC");
+      if (p(fact, "mfinalfuncExtra")) parts.push("MFINALFUNC_EXTRA");
+      const mfinalfuncModify =
+        FINALFUNC_MODIFY[str(p(fact, "mfinalfuncModify") ?? "r")];
+      if (mfinalfuncModify != null)
+        parts.push(`MFINALFUNC_MODIFY = ${mfinalfuncModify}`);
       const initcond = p(fact, "initcond");
       if (initcond != null) parts.push(`INITCOND = ${lit(str(initcond))}`);
+      const minitcond = p(fact, "minitcond");
+      if (minitcond != null) parts.push(`MINITCOND = ${lit(str(minitcond))}`);
+      const sortop = p(fact, "sortop");
+      if (sortop != null) parts.push(`SORTOP = ${str(sortop)}`);
+      const parallel = PARALLEL[str(p(fact, "parallel") ?? "u")];
+      if (parallel != null) parts.push(`PARALLEL = ${parallel}`);
       if (str(p(fact, "aggKind")) === "h") parts.push("HYPOTHETICAL");
       return [
         {
@@ -82,6 +128,22 @@ export const routineRules: Record<string, KindRules> = {
       stype: "replace",
       finalfunc: "replace",
       initcond: "replace",
+      combinefunc: "replace",
+      serialfunc: "replace",
+      deserialfunc: "replace",
+      msfunc: "replace",
+      minvfunc: "replace",
+      mstype: "replace",
+      msspace: "replace",
+      mfinalfunc: "replace",
+      minitcond: "replace",
+      finalfuncExtra: "replace",
+      mfinalfuncExtra: "replace",
+      finalfuncModify: "replace",
+      mfinalfuncModify: "replace",
+      sspace: "replace",
+      sortop: "replace",
+      parallel: "replace",
     },
   },
 };
