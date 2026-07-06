@@ -2,13 +2,13 @@
  * The single fact-level projection primitive (docs/architecture/managed-view-architecture.md
  * move 4): `excludeByProvenance(fb, edgeKind)` removes every fact carrying an
  * outgoing edge of that kind plus its descendant subtree, and prunes edges with
- * a removed endpoint. `excludeManaged` / `excludeExtensionMembers` are thin
- * wrappers over it; future scope/capability projections reuse the same core.
+ * a removed endpoint. `resolveView` uses it directly for `managedBy`; future
+ * scope/capability projections reuse the same core.
  */
 import { describe, expect, test } from "bun:test";
 import { buildFactBase, type Fact } from "../core/fact.ts";
-import type { StableId } from "../core/stable-id.ts";
-import { excludeByProvenance } from "./view.ts";
+import { encodeId, type StableId } from "../core/stable-id.ts";
+import { excludeByProvenance, projectManagementScope } from "./view.ts";
 
 const schema = (name: string): StableId => ({ kind: "schema", name });
 const table = (s: string, name: string): StableId => ({
@@ -76,5 +76,29 @@ describe("excludeByProvenance — generic fact-level projection", () => {
     ).toBeDefined();
     // projecting by managedBy removes it
     expect(excludeByProvenance(fb, "managedBy").get(managed)).toBeUndefined();
+  });
+
+  test("preserves reference-only marks for surviving facts across projection", () => {
+    // A projection that removes some facts (here database-scope role pruning)
+    // must carry the reference-only set forward for the facts that survive —
+    // otherwise extension members / assumed-schema platform objects that
+    // resolveView() deliberately kept reference-only become managed again and
+    // get planned/dropped.
+    const pub = schema("public");
+    const memberTable = table("public", "gql_state");
+    const role: StableId = { kind: "role", name: "some_role" };
+    const fb = buildFactBase(
+      [f(pub), f(memberTable, pub), f(role)],
+      [],
+      undefined,
+      new Set([encodeId(memberTable)]),
+    );
+
+    const out = projectManagementScope(fb, "database");
+
+    // the role fact is pruned (database scope does not manage roles) ...
+    expect(out.get(role)).toBeUndefined();
+    // ... but the surviving reference-only mark is preserved
+    expect(out.isReferenceOnly(memberTable)).toBe(true);
   });
 });

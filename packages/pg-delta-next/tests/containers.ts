@@ -25,9 +25,35 @@ import pg from "pg";
 const PG_IMAGE = process.env["PGDELTA_TEST_IMAGE"] ?? "postgres:17-alpine";
 
 /** Supabase image (ships pg_partman / pgmq / pg_cron) for extension-intent
- *  integration tests (docs/architecture/extension-intent.md). */
-const SUPABASE_IMAGE =
+ *  integration tests (docs/architecture/extension-intent.md). Exported so the
+ *  baseline-fixture pipeline (scripts/sync-supabase-base-images.ts) boots the
+ *  exact same tag it validates against. */
+export const SUPABASE_IMAGE =
   process.env["PGDELTA_SUPABASE_TEST_IMAGE"] ?? "supabase/postgres:17.6.1.135";
+
+/**
+ * Self-gate for heavy bare-Supabase-image tests (`supabaseCluster()`).
+ *
+ * The bare image is a fixed major (17), independent of the matrix leg's
+ * `PGDELTA_TEST_IMAGE`. Without a gate a new Supabase integration file would
+ * spin that heavy image on ALL five CI legs (14/15/16/17/18) every PR for zero
+ * extra coverage — the image major never changes. So run these once, on the leg
+ * whose major matches the image; honor a hard opt-out
+ * (`PGDELTA_NEXT_SUPABASE_TESTS=0`, e.g. forked PRs without image access) and a
+ * force override (`=1`) for local single-file runs on a non-matching leg.
+ *
+ * Use as `describe.skipIf(!runSupabaseBareTests)(...)`.
+ */
+const LEG_PG_MAJOR = Number(/postgres:(\d+)/.exec(PG_IMAGE)?.[1] ?? "17");
+/** Major version of the pinned Supabase image — names the baseline fixture
+ *  (tests/fixtures/supabase-base-init/<major>.sql) and its regeneration. */
+export const SUPABASE_BARE_MAJOR = Number(
+  /postgres:(\d+)/.exec(SUPABASE_IMAGE)?.[1] ?? "17",
+);
+export const runSupabaseBareTests =
+  process.env["PGDELTA_NEXT_SUPABASE_TESTS"] !== "0" &&
+  (process.env["PGDELTA_NEXT_SUPABASE_TESTS"] === "1" ||
+    LEG_PG_MAJOR === SUPABASE_BARE_MAJOR);
 
 let dbCounter = 0;
 
@@ -137,6 +163,12 @@ export class Cluster {
         .query(`DROP ROLE IF EXISTS ${quoted}`)
         .catch(() => {});
     }
+  }
+
+  /** Tear down the cluster: close the admin pool and stop the container. */
+  async stop(): Promise<void> {
+    await this.adminPool.end().catch(() => {});
+    await this.container.stop().catch(() => {});
   }
 }
 
@@ -299,4 +331,31 @@ let seclabelShared: Promise<Cluster> | null = null;
 export async function seclabelCluster(): Promise<Cluster> {
   seclabelShared ??= startSeclabelCluster();
   return seclabelShared;
+}
+
+/**
+ * Stop every started singleton cluster and reset the singletons so a later call
+ * re-starts fresh. The `withDb`-style test teardown only drops databases, never
+ * the shared containers; standalone scripts (e.g. the dogfood suite) call this
+ * in a `finally` so a run leaks no containers. Ryuk still reaps on process
+ * death — this is the clean in-process path.
+ */
+export async function stopAllClusters(): Promise<void> {
+  const pending = [shared, supabaseShared, seclabelShared].filter(
+    (p): p is Promise<Cluster> => p !== null,
+  );
+  const pairPending = isolatedPair;
+  shared = null;
+  supabaseShared = null;
+  seclabelShared = null;
+  isolatedPair = null;
+
+  const clusters = (
+    await Promise.all(pending.map((p) => p.catch(() => null)))
+  ).filter((c): c is Cluster => c !== null);
+  if (pairPending) {
+    const pair = await pairPending.catch(() => null);
+    if (pair) clusters.push(...pair);
+  }
+  await Promise.all(clusters.map((c) => c.stop()));
 }
