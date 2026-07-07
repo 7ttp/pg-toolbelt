@@ -1,194 +1,202 @@
-# pg-delta
+# @supabase/pg-delta-next
 
-PostgreSQL migrations made easy.
+Clean-room rebuild of pg-delta per [`docs/architecture/target-architecture.md`](../../docs/architecture/target-architecture.md)
+(see [the build log](../../docs/build-log.md) for how it was built, stage by
+stage). **Working name** — final naming is a stage-10 product decision. Private
+until the cutover parity bar.
 
-Generate migration scripts by comparing two PostgreSQL databases. Automatically detects schema differences and creates safe, ordered migration scripts. Supports both imperative diff-based migrations and declarative file-based schema management.
+> **Using it?** See [docs/getting-started.md](../../docs/getting-started.md) for
+> the CLI and the programmatic API.
 
-## Features
+## What works today (proven by the test suite)
 
-- 🔍 Compare databases and generate migration scripts automatically
-- 🔒 Safety-first: detects data-loss operations and requires explicit confirmation
-- 📋 Plan-based workflow: preview changes before applying, store plans for version control
-- 📁 Declarative schemas: export/apply schemas as version-controlled `.sql` files
-- 🎯 Integration DSL: filter and customize serialization with JSON-based rules
-- 🛠️ Developer-friendly: interactive CLI with tree-formatted change previews
+The full pipeline, end to end, on the covered kinds:
 
-## Installation
+```text
+extract (one consistent txn)  →  fact base (content-addressed, Merkle rollups)
+        →  generic diff (fact deltas — zero per-kind code)
+        →  rule table → atomic actions → ONE dependency graph → deterministic sort
+        →  apply (single txn, per-statement attribution)
+        →  provePlan (state proof + data-preservation proof on a TEMPLATE clone)
+```
+
+plus the **declarative frontend**: `loadSqlFiles` applies files to a shadow
+database with fail-safe ordering (bounded rounds), routine-body
+re-validation, shared-object leak detection, and parser-free DML rejection
+— then the result flows through the same plan/prove path.
+
+### Statement reordering assist (opt-in)
+
+`loadSqlFiles` is parser-free: it sequences whole *files* into the shadow, so it
+tolerates cross-file disorder but cannot reorder statements *within* a file. The
+opt-in **statement reordering assist** restores "author in any internal order,
+it still loads" by splitting files into one-statement units and topologically
+pre-sorting them (via `@supabase/pg-topo`) before the loader runs. See
+[target-architecture §4.4.1](../../docs/architecture/target-architecture.md).
+
+- **Subpath:** `@supabase/pg-delta-next/sql-order` exposes
+  `orderForShadow(files)` / `analyzeForShadow(files)` (returning single-statement
+  `SqlFile`s ready to feed straight into `loadSqlFiles`), `canReorder()`, and the
+  typed `ReorderUnavailableError`.
+- **Dependency posture:** `@supabase/pg-topo` is an **optional peer dependency**,
+  loaded only through a guarded dynamic `import()` when this subpath runs —
+  importing the core (`fact` / `diff` / `plan` / `apply` / `loadSqlFiles`) never
+  pulls the libpg-query WASM parser. If the peer is absent the subpath throws
+  `ReorderUnavailableError` with an install hint; `canReorder()` probes instead.
+- **CLI:** `schema apply` runs the assist by default (`--no-reorder` reproduces
+  raw file granularity for debugging). On a non-converging load it rewrites
+  synthetic ordinal names back to `file:line:col` and attaches any detected
+  shadow-load cycle as an advisory hint on top of the authoritative Postgres
+  error. `schema lint --dir <dir>` runs the analyzer statically (no database) to
+  surface cycles and other diagnostics for proactive authoring — deliberately
+  out of the apply path so apply stays Postgres-truth.
+
+- **Corpus proof loop**: every scenario in `corpus/` proven in BOTH
+  directions (build and teardown) — state proof = zero drift deltas after
+  applying the plan to a clone; data proof = seeded rows survive. The proof
+  reports honest per-table **coverage** (`tablesChecked`, `tablesSkipped`,
+  and a `contentMode` of `fingerprint` / `count` / `none`) rather than a bare
+  boolean: a non-empty table whose schema is unchanged is content-fingerprinted
+  (a count-preserving content change is caught); a table whose schema changed
+  is count-checked; an empty table is not checked (seed it for teeth). `ok` is
+  backed by that coverage — it is not a guarantee beyond what was checked.
+- **Fixture-validity layer**: green independently of the engine, so an
+  engine failure can never be a broken fixture.
+- **Extractor ring**: fixture DDL → asserted facts/payloads/edges,
+  deterministic re-extraction, snapshot round-trip, clone fidelity.
+
+## Kind coverage
+
+schema, role (incl. configs), role memberships, default privileges,
+extension, table (incl. partitioned/partitions, INHERITS, replica
+identity), column, default, constraint (tables + domains), index,
+sequence (incl. OWNED BY), view, materialized view, function/procedure,
+aggregate, trigger, policy, rewrite rule, event trigger, domain,
+enum/composite/range types, collation, publication, subscription,
+FDW/server/user-mapping/foreign-table, comments (one global rule),
+ACLs (one global rule, REVOKE-first).
+
+The corpus (`corpus/`, ~210 scenarios) is the port of the old pg-delta
+integration suite — see `PORTING.md` for the per-case ledger and the
+not-ported-with-reason list (Supabase-image, policy-layer/stage-8,
+dummy_seclabel, stage-9 renames/export).
+
+## Stage coverage (target-architecture)
+
+All engineering stages are implemented:
+
+- **Stages 0–4** — corpus + EXPECTED_RED ledger, fact core (Merkle
+  rollups, snapshots), extractors (one consistent txn, acldefault-
+  normalized ACLs), proof harness (state + data preservation), diff.
+- **Stage 5** — the rule table, one mixed graph, deterministic sort,
+  compaction (column clauses fold into `CREATE TABLE` when no edge
+  crosses the merge — cosmetic by contract, proof-stability asserted),
+  the vetted lock-class table, the 10k-object benchmark fixture +
+  timing harness (`scripts/benchmark.ts`, in CI), the generative engine
+  + soak (`tests/generative.test.ts`, scale with `PGDELTA_NEXT_SOAK`).
+- **Stage 6** — plan artifact v1 (engineVersion, safetyReport, lossless
+  round-trip), segmented executor (three-valued transactionality:
+  `CREATE INDEX CONCURRENTLY` runs alone, `ALTER TYPE … ADD VALUE`
+  forces a commit boundary before its first consumer), per-action
+  applied/unapplied/inDoubt failure reporting, the fingerprint gate,
+  session preamble as metadata, render-from-fact-base materialization.
+- **Stage 7** — shadow-DB SQL loader + snapshot frontend.
+- **Stage 8** — policy DSL v2 (typed serializable predicates,
+  first-match-wins, extends with cycle detection), delta filtering with
+  reported (never silent) filtered deltas, serialize parameters declared
+  by the rule table, baseline subtraction, the Supabase policy package.
+- **Stage 9** — rename detection over structural rollups
+  (`renames: "auto" | "prompt" | "off"`, ambiguity/near-miss verdicts,
+  data preservation proven down to column values), declarative export
+  with the `load(export(fb)) ≡ fb` gate (+ an "ordered" layout that
+  loads in a single pass, and a "grouped" layout that restores the old
+  engine's category-grouped/readable output with opt-in name-pattern,
+  flat-schema, and partition grouping; opt-in SQL pretty-printing via
+  `--format-options`, also exposed as the `@supabase/pg-delta-next/sql-format`
+  library helper), drift, finalized public API (subpath
+  exports, reviewed name-by-name in `API-REVIEW.md`), CLI v2.
+
+The proof loop now verifies the two safety fields state-proof alone can't
+see (§3.7): **rewrite risk** is observed on the clone (a kept table whose
+`relfilenode` changed under no `rewriteRisk`-declaring action fails the
+proof) and **data preservation** can be sharpened with opt-in `autoSeed`
+(synthetic rows in empty kept tables). Per-kind graph policy
+(cascade/rebuild/suppression/defacl) lives entirely in the rule table as
+`KindRules` flags — the planner body holds no kind-name lists (guardrail 3).
+
+Every addressable thing is a fact at one grain (§3.1): composite-type
+attributes (`typeAttribute`) and publication members (`publicationRel` /
+`publicationSchema`) are sub-entity facts, so they diff at sub-entity grain
+and are rename candidates — a composite attribute renames in place,
+data-preserving, instead of forcing a type rebuild. See `COVERAGE.md` for
+the full catalog-coverage map and deliberate exclusions (languages, large
+objects, …).
+
+Environment-gated leftovers: security labels are fully modeled and proven
+end-to-end (`tests/security-label-proof.test.ts`) against a built
+`dummy_seclabel` image (`tests/dummy-seclabel.Dockerfile`); the image builds
+on first run and `PGDELTA_SKIP_DUMMY_SECLABEL_BUILD=1` skips it where the
+build CDNs are unreachable. The real-Supabase-image baseline proof needs a
+Supabase container (mechanism + generation script exist — run
+`scripts/generate-supabase-baseline.ts`). Stage 10 (cutover) is a product
+decision gated on the parity bar — the porting ledger, soak quota at
+scale, and naming are deliberately not unilateral engineering calls.
+
+Known v1 simplifications:
+
+- extension members of the common object kinds (tables, sequences, views,
+  routines, types, domains, collations, schemas) are observed at extraction
+  with `memberOfExtension` provenance edges and projected out by default
+  (4b); sub-entity families (columns, constraints, indexes, triggers,
+  policies, rules) and rare member-root kinds (fdw, server, foreign table,
+  event trigger, publication) are still filtered at extraction — a
+  documented, regression-free limitation (see COVERAGE.md)
+- capture is serial on one snapshot connection (parallel
+  `pg_export_snapshot()` workers are a measured optimization)
+- a surviving dependent of a destroyed fact is force-rebuilt when its kind
+  declares `rebuildable` in the rule table (view, matview, index, policy,
+  trigger, rule, constraint, default, procedure); a non-rebuildable
+  survivor whose dependency stays gone fails the plan loudly
+
+## Running
 
 ```bash
-npm install @supabase/pg-delta
+bun test src/        # unit: codec, hashing, fact base, snapshot, diff, policy
+bun test tests/      # integration: Docker required (postgres:17-alpine)
+bun run check-types
+PGDELTA_TEST_IMAGE=postgres:15-alpine bun test tests/   # other PG versions
+PGDELTA_NEXT_ONLY=enum bun test tests/engine.test.ts    # corpus subset
+PGDELTA_NEXT_SHARD=0/4 bun test tests/engine.test.ts    # parallel shard
+PGDELTA_NEXT_SOAK=200 bun test tests/generative.test.ts # bigger soak
+bun scripts/benchmark.ts                                # timing numbers
 ```
 
-Or use with `npx`:
+Compaction (cosmetic clause folding + redundant-drop / default-ACL elision) is
+**on by default** and proof-stable — the plan converges to the same state either
+way. The passes, in order:
 
-```bash
-npx @supabase/pg-delta --source <source> --target <target>
-```
+- **column folds** — `ADD COLUMN` clauses fold into their bare `CREATE TABLE`
+  when no graph edge crosses the merge.
+- **redundant-drop elision** — a replace's drop is dropped when the create
+  reproduces the byte-identical statement (self-resetting ACL/REVOKE).
+- **default-ACL elision** — whole `REVOKE`/`GRANT` groups that only
+  re-materialize a freshly-created object's built-in owner/PUBLIC defaults are
+  removed.
+- **co-create REVOKE elision** — the leading `REVOKE ALL` is trimmed off a
+  remaining third-party grant on a co-created object (the `GRANT` is kept), gated
+  by a strict-superset guard against any create-time `defaultPrivilege` for the
+  applier role.
+- **co-create ownership fold** — a co-created object's owner `ALTER` folds into
+  its `CREATE`: `CREATE SCHEMA … AUTHORIZATION owner` (always, syntactic), and a
+  no-op `ALTER … OWNER TO` is dropped when the desired owner is the applier
+  (`capability.role`, probed at apply time).
 
-## Quick Start
+Pass `--no-compact` to `compare` to emit the maximally-inlined DDL (one
+statement per action, every `REVOKE`/`GRANT`/`OWNER TO` spelled out), which is
+useful when diffing engine output statement-by-statement.
 
-### CLI Usage
 
-The CLI provides two paradigms: **imperative** (diff-based migrations) and **declarative** (file-based schemas).
-
-#### Imperative: diff-based migrations
-
-**Sync (default)** - Plan and apply changes in one go:
-
-```bash
-pg-delta sync \
-  --source postgresql://user:pass@localhost:5432/source_db \
-  --target postgresql://user:pass@localhost:5432/target_db
-```
-
-**Plan** - Preview changes before applying:
-
-```bash
-pg-delta plan \
-  --source postgresql://user:pass@localhost:5432/source_db \
-  --target postgresql://user:pass@localhost:5432/target_db \
-  --output plan.json
-```
-
-**Apply** - Apply a previously created plan:
-
-```bash
-pg-delta apply \
-  --plan plan.json \
-  --source postgresql://user:pass@localhost:5432/source_db \
-  --target postgresql://user:pass@localhost:5432/target_db
-```
-
-#### Declarative: file-based schemas
-
-**Declarative export** - Export a database schema as `.sql` files:
-
-```bash
-pg-delta declarative export \
-  --target postgresql://user:pass@localhost:5432/mydb \
-  --output ./declarative-schemas/
-```
-
-**Declarative apply** - Apply `.sql` files to a database:
-
-```bash
-pg-delta declarative apply \
-  --path ./declarative-schemas/ \
-  --target postgresql://user:pass@localhost:5432/fresh_db
-```
-
-#### Utilities
-
-**Catalog export** - Snapshot a database catalog to JSON for offline diffing:
-
-```bash
-pg-delta catalog-export \
-  --target postgresql://user:pass@localhost:5432/mydb \
-  --output snapshot.json
-```
-
-The snapshot can be used as `--source` or `--target` for `plan` and `declarative export`, enabling offline diffs without a live database connection.
-
-See the [Workflow Guide](./docs/workflow.md) for end-to-end examples combining these commands.
-
-### Using Integrations
-
-Use built-in integrations or custom JSON files:
-
-```bash
-# Built-in Supabase integration
-pg-delta sync --source <source> --target <target> --integration supabase
-
-# Custom integration file
-pg-delta sync --source <source> --target <target> --integration ./my-integration.json
-```
-
-### Programmatic Usage
-
-```typescript
-import { main } from "@supabase/pg-delta";
-
-const result = await main(
-  "postgresql://source",
-  "postgresql://target"
-);
-
-if (result) {
-  console.log(result.migrationScript);
-}
-```
-
-For plan-based workflow:
-
-```typescript
-import { createPlan, applyPlan } from "@supabase/pg-delta";
-
-// Create a plan
-const planResult = await createPlan(sourceUrl, targetUrl, {
-  filter: { schema: "public" },
-  serialize: [{ when: { type: "schema" }, options: { skipAuthorization: true } }]
-});
-
-if (planResult) {
-  // Apply the plan
-  const result = await applyPlan(
-    planResult.plan,
-    sourceUrl,
-    targetUrl
-  );
-}
-```
-
-## Documentation
-
-- [Workflow Guide](./docs/workflow.md) - Full flow documentation for all commands and end-to-end workflows
-- [CLI Reference](./docs/cli.md) - Complete CLI documentation with all commands and options
-- [API Reference](./docs/api.md) - Programmatic API documentation
-- [Integrations](./docs/integrations.md) - Using and creating integrations with the DSL system
-- [Sorting & Safety](./docs/sorting.md) - How migrations are ordered for safety
-
-## Key Concepts
-
-### Plan-Based Workflow
-
-`pg-delta` uses a plan-based workflow that provides:
-
-- **Preview before apply**: Review changes before executing them
-- **Self-contained plans**: Plans store filtering and serialization rules
-- **Reproducibility**: Plans can be version-controlled and shared
-- **Safety checks**: Automatic detection of data-loss operations
-
-### Integration DSL
-
-Integrations use a JSON-based DSL for filtering and serialization:
-
-- **Filter DSL**: Pattern matching to include/exclude changes
-- **Serialization DSL**: Rules to customize SQL generation
-- **Serializable**: Can be stored in plans and passed as CLI flags
-
-See [Integrations Documentation](./docs/integrations.md) for complete details.
-
-## Use Cases
-
-- Generate migrations between environments (dev → staging → production)
-- Compare database states and review differences
-- Automate migration creation in CI/CD pipelines
-- Maintain schema version control with plan files
-- Export and version-control schemas as declarative `.sql` files
-- Apply declarative schemas to fresh databases (provisioning, restore)
-- Snapshot databases for offline, reproducible diffs
-- Filter platform-specific changes (e.g., Supabase system schemas)
-
-## Contributing
-
-Please follow the repository-level guide in [../../CONTRIBUTING.md](../../CONTRIBUTING.md).
-
-In particular:
-
-- Open an issue first.
-- Wait for maintainer triage via one of `✨ Feature`, `🐛 Bug`, `📘 Docs`, or `🛠️ Chore` before opening a pull request.
-- Use [../../ISSUES.md](../../ISSUES.md) when reporting `pg-delta` bugs so maintainers have what they need to reproduce them.
-
-## License
-
-MIT
+See `docs/architecture/target-architecture.md` §10. The ones most often relevant here:
+no SQL parsing in the trusted path; no per-kind code outside the rule
+table; a cycle is a rule bug (there is no breaker module, ever); never
+assert SQL bytes in tests — assert state, data survival, or action shape.
