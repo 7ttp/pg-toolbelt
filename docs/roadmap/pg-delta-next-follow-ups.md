@@ -339,3 +339,75 @@ deliberate test-harness fallout. Recommended fix (Fable design):
   a bogus file; `extract/publications.ts` keeps `enabled: true` for a redacted
   subscription, so a default redacted export can activate a worker against a
   placeholder conninfo. Both should preserve the non-credential value or refuse.
+
+## PR #299 review triage (Codex) — engine-hardening backlog
+
+Context: PR #299 promoted the clean-room engine to `@supabase/pg-delta` (the hard
+switch). Codex re-reviews every commit and re-surfaces **pre-existing** engine gaps
+— the switch itself only moved the package and added the build/CI/docs, so the
+engine code is byte-identical to pre-switch. **None of these are switch
+regressions**, and none were fixed in #299 (scope kept to the switch). They belong
+to the engine-hardening track, alongside the extract-completeness fixes already
+landed here (reloptions, aggregate/range/identity/subscription options: `f530082`,
+`1fbdc69`, `528bc60`, `ed1bcdd`, `a638ecf`). Recorded with `comment_id`s for pickup.
+
+### Batch A — planning/extract crashes on legitimate declarative input (highest value)
+
+These make `plan` / `schema apply` / `export` throw on inputs a user can legitimately
+author. The first two share the "nullable/`false` transition → `str()` throws → route
+to **replace**" pattern already used for policy clause removal (`d2cdbf7`).
+
+- **constraint validated→NOT VALID** — `src/plan/rules/constraints.ts:49` (comment
+  `3537607442`). `validated` delta with `to === false` calls `str(to)` and aborts.
+  Route through replace/drop-add (mirror policy `usingExpr`/`checkExpr` → `"replace"`).
+- **foreign server VERSION removal** — `src/plan/rules/foreign.ts:70` (comment
+  `3537607455`). `version` → `null` throws in the alter path (create already treats
+  null as omitted). Handle the nullable transition or mark the attribute for replace.
+- **enum rebuild with enum-array column** — `src/plan/rules/types.ts:230` (comment
+  `3537607496`). For a `that_enum[]` column the rewrite renders scalar
+  `TYPE <enum> USING col::text::<enum>` instead of the column's desired array type —
+  plan fails / would scalarize the column. Use each dependent column fact's desired
+  type/cast, not the enum `relName` unconditionally.
+- **reference-only export member under a managed non-public schema** —
+  `src/frontends/export-sql-files.ts:359` (comment `3537607461`). Member seeded into
+  the pristine baseline without its schema parent → `buildFactBase` missing-parent
+  throw before any file renders. Seed the ancestor chain with the reference-only facts.
+- **user mapping on a filtered extension-owned server** — `src/extract/foreign.ts:91`
+  (comment `3537607477`). Ext-owned servers are anti-joined out, but `pg_user_mapping`
+  rows still emit and parent to an absent `server` fact → missing-parent throw. Filter
+  the mappings consistently, or keep the server as a reference-only parent.
+
+### Batch B — rendering / access / library correctness
+
+- **zero-argument aggregate metadata** — `src/plan/render.ts:59` (comment
+  `3537607470`). `COMMENT ON AGGREGATE "s"."agg"()` (and the reused SECURITY LABEL
+  target) must be `(*)` for zero-arg aggregates; a from-empty plan creates the
+  aggregate then fails on the metadata statement. Use the signature renderer that
+  emits `*` for empty args.
+- **role security labels touch `pg_authid`** — `src/extract/security-labels.ts:195`
+  (comment `3537607465`). If any security label exists and extraction runs as a
+  non-superuser, the role-label query reads `pg_authid` (superuser-only) and fails —
+  even when the label is on a table. Join through `pg_roles`.
+- **default apply gate ignores plan redaction mode** — `src/apply/apply.ts:144`
+  (comment `3537607487`). A library caller applying an unredacted plan
+  (`redactSecrets: false`) without the CLI wrapper still re-extracts redacted, so the
+  fingerprint gate compares cleartext to placeholders and rejects an unchanged target.
+  When no custom `reextract` is supplied, pass `thePlan.redactSecrets ?? true` to
+  `extract` (mirror in `prove.ts` re-extraction). Ties to the display-vs-apply
+  redaction follow-up (comment `3428269873`).
+
+### Earlier open extract-completeness batch (same track)
+
+From the same review stream; jgoux fixed several siblings, these remain for pickup —
+role membership SET/INHERIT options (`3530186654`), database-scoped role GUCs
+`setdatabase<>0` (`3530186665`), unlogged sequences `relpersistence` (`3530186678`),
+matview populated state `WITH [NO] DATA` (`3530186683`), user-defined base types
+(`3530186693`), user-rule dependency resolution to rule facts (`3530186701`), custom
+identity sequence names (`3530186709`), foreign-column FDW options `attfdwoptions`
+(`3530186714`), PG18 virtual generated columns (`3530186719`), publication
+`publish_generated_columns` (`3530186730`), role connection limits `rolconnlimit`
+(`3530186736`), multiple-inheritance parents (`3536715681`), foreign-table partition
+attachments (`3536715689`), non-relocatable extension `SET SCHEMA` (`3536715698`),
+enum metadata restore after value-set rebuild (`3536715704`), partial default-privilege
+reset before grants (`3536715708`), window-function dependency resolution `prokind='w'`
+(`3536715714`), publication-member rebuild on table replace (`3536715717`).
