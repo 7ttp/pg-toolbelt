@@ -20,6 +20,7 @@
  *                  [--renames auto|prompt|off] [--no-compact] [--out <plan.json>]
  *                  [--accept-rename <from>=<to>] ...
  *   apply          --plan <plan.json> --target <pg-url> [--force]
+ *   render         --plan <plan.json> --out <base>.sql [--allow-drops]
  *   prove          --plan <plan.json> --clone <pg-url> --desired-snapshot <file>
  *   diff           --source <pg-url> --desired <pg-url>
  *   drift          --env <pg-url> --snapshot <file>
@@ -41,6 +42,7 @@
 
 import { cmdPlan } from "./commands/plan.ts";
 import { cmdApply } from "./commands/apply.ts";
+import { cmdRender } from "./commands/render.ts";
 import { cmdProve } from "./commands/prove.ts";
 import { cmdDiff } from "./commands/diff.ts";
 import { cmdDrift } from "./commands/drift.ts";
@@ -59,6 +61,7 @@ Commands:
                  [--renames auto|prompt|off] [--no-compact] [--out <plan.json>]
                  [--accept-rename <from>=<to>] ...
   apply          --plan <plan.json> --target <pg-url> [--force]
+  render         --plan <plan.json> --out <base>.sql [--allow-drops]
   prove          --plan <plan.json> --clone <pg-url> --desired-snapshot <file>
   diff           --source <pg-url> --desired <pg-url>
   drift          --env <pg-url> --snapshot <file>
@@ -73,6 +76,28 @@ Commands:
   schema lint    --dir <dir>
 
 Notes:
+  --profile: raw | supabase, OR a path to a custom profile .json file
+    (a value containing "/" or ending in ".json" is loaded from disk). The
+    file is { "id": ..., "handlers": ["pg_partman", "pg_cron"], "policy"?: {…} },
+    referencing bundled handlers by name. Available on plan / diff / drift /
+    snapshot / apply / prove / schema export / schema apply.
+  render: writes the plan's SQL as one .sql file per executor segment,
+    split on the same boundaries "apply" uses at execution time. A single
+    segment writes <base>.sql; multiple segments write <base>_1.sql,
+    <base>_2.sql, ... in execution order. A non-transactional segment's file
+    starts with a machine-readable "-- pg-delta: transaction=false" header.
+    render is migration-runner-agnostic: it emits ordered segment SQL and
+    leaves runner-specific packaging to a thin consumer. For dbmate, that
+    consumer writes one migration per segment with a DISTINCT version, wraps
+    each in -- migrate:up / -- migrate:down, and maps the transactionality
+    header to "-- migrate:up transaction:false". Refuses to render a
+    DESTRUCTIVE plan unless --allow-drops is given — any "drop"-verb action
+    OR any action marked dataLoss:"destructive" (e.g. an enum rewrite), per
+    the plan's safety metadata, not the verb alone.
+    Exit codes: 0 = files written, 1 = error (no files written),
+    2 = usage error, 3 = plan has no actions (no files written, not an
+    error). Prints one JSON summary line to stdout; human/status output
+    goes to stderr only.
   --renames defaults to "prompt" for the CLI (library default is "off").
   --accept-rename: confirm a rename from a prior prompt run; repeatable.
   --no-reorder (schema apply): skip the statement-reordering assist and load
@@ -109,6 +134,9 @@ async function main(): Promise<void> {
         break;
       case "apply":
         await cmdApply(rest);
+        break;
+      case "render":
+        await cmdRender(rest);
         break;
       case "prove":
         await cmdProve(rest);
