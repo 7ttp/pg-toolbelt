@@ -1,10 +1,10 @@
-# pg-delta-next: why we rebuilt the schema-diff engine
+# pg-delta: why we rebuilt the schema-diff engine
 
 > **TL;DR** — `@supabase/pg-delta` compares two PostgreSQL databases and emits a
 > migration to turn one into the other. The original engine was correct but had
 > grown to **~54,000 lines** in which PostgreSQL's semantics were re-implemented
 > in **eight** different places, with **no way to prove a migration actually
-> works** before shipping it. `pg-delta-next` is a clean-room rebuild on a single
+> works** before shipping it. `pg-delta` is a clean-room rebuild on a single
 > idea — *let PostgreSQL be the only thing that understands PostgreSQL* — and a
 > single safety net: **every migration is applied to a throwaway clone and
 > proven to converge, with your data intact, before you trust it.** The result is
@@ -100,7 +100,7 @@ new engine**.
 
 ## 2. The core bet: two principles
 
-`pg-delta-next` is built on two inversions (full rationale in
+`pg-delta` is built on two inversions (full rationale in
 [architecture/target-architecture.md](architecture/target-architecture.md) §2):
 
 **P1 — PostgreSQL is the only elaborator.** Every input state is resolved by an
@@ -156,9 +156,9 @@ exactly the plan you run.
 ## 4. Old vs new, by the numbers
 
 All figures verified against the working tree (`packages/pg-delta` vs
-`packages/pg-delta-next`), source files only (excluding `*.test.ts`).
+`packages/pg-delta`), source files only (excluding `*.test.ts`).
 
-| Dimension | OLD `pg-delta` | NEW `pg-delta-next` | Change |
+| Dimension | OLD engine | NEW engine (`pg-delta`) | Change |
 |---|---:|---:|---|
 | Source LOC (non-test) | 53,933 | 11,471 | **−79%** |
 | Source files | 341 | 46 | **−87%** |
@@ -308,7 +308,7 @@ revisit):
 
 | Not yet | Why it's safe | Where |
 |---|---|---|
-| *Model* rare kinds (casts, operators, text-search, statistics, languages, transforms) | They are **detected and reported**, never silently dropped; modeling is demand-driven | [COVERAGE.md](../packages/pg-delta-next/COVERAGE.md), [roadmap/post-v1.md](roadmap/post-v1.md) |
+| *Model* rare kinds (casts, operators, text-search, statistics, languages, transforms) | They are **detected and reported**, never silently dropped; modeling is demand-driven | [COVERAGE.md](../packages/pg-delta/COVERAGE.md), [roadmap/post-v1.md](roadmap/post-v1.md) |
 | Extension-intent **Phase B** (replay extension objects on rebuild) | Phase A (don't-drop) ships; replay is blocked on a declarative-format decision | [roadmap/extension-intent-phase-b.md](roadmap/extension-intent-phase-b.md) |
 | Parallel snapshot extraction | Re-profiled: < 2× win for high refactor risk | [roadmap/post-v1.md](roadmap/post-v1.md) |
 | Stage-10 cutover (naming, deprecation, migration guide) | Sequenced after v1 + performance | [roadmap/post-v1.md](roadmap/post-v1.md) |
@@ -329,5 +329,5 @@ Consumers migrate once, at the cutover parity bar: the public surface stays the
 | How stateful extensions (pgmq, pg_cron, pg_partman) are handled | [architecture/extension-intent.md](architecture/extension-intent.md) |
 | The performance work (shipped) and memory roadmap | [build-log.md](build-log.md), [roadmap/post-v1.md](roadmap/post-v1.md) |
 | What's left before cutting v1 | [roadmap/v1.md](roadmap/v1.md) and [roadmap/README.md](roadmap/README.md) |
-| What the engine models / deliberately excludes | [../packages/pg-delta-next/COVERAGE.md](../packages/pg-delta-next/COVERAGE.md) |
+| What the engine models / deliberately excludes | [../packages/pg-delta/COVERAGE.md](../packages/pg-delta/COVERAGE.md) |
 | How it was built and reviewed | [build-log.md](build-log.md) |

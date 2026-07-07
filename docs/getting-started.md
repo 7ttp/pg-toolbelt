@@ -1,22 +1,21 @@
-# Getting started with pg-delta-next
+# Getting started with pgdelta
 
-`pg-delta-next` turns one PostgreSQL schema into another. You give it a **source**
+`pgdelta` turns one PostgreSQL schema into another. You give it a **source**
 (where you are) and a **desired** state (where you want to be); it produces an
 ordered DDL migration, **proves** that migration converges with your data intact,
 and applies it.
 
 You can drive it two ways:
 
-- **The CLI** — `pg-delta-next <command>` for diffing, planning, proving, applying,
+- **The CLI** — `pgdelta <command>` for diffing, planning, proving, applying,
   and a declarative `.sql`-files workflow.
 - **The library** — import the pipeline functions (`extract`, `plan`, `apply`,
   `provePlan`, …) and compose them yourself.
 
-> **Status:** `@supabase/pg-delta-next` is **private and pre-release** (`0.0.0`).
-> It is not on npm yet — you run it from this monorepo. The public `pg-delta`
-> surface (`createPlan` / `applyPlan`) is unchanged; this package is the
-> clean-room engine that will sit behind it at cutover. See
-> [overview.md](overview.md) for the why.
+> **Status:** `@supabase/pg-delta` is this clean-room engine, published as a
+> **breaking-change alpha** (`1.0.0-alpha.x`). It replaced the legacy engine
+> outright — the CLI, the public API, and the persisted artifact formats are
+> all new; nothing carries over. See [overview.md](overview.md) for the why.
 
 ---
 
@@ -53,30 +52,30 @@ From the monorepo (Bun):
 
 ```bash
 bun install
-cd packages/pg-delta-next
+cd packages/pg-delta
 bun run src/cli/main.ts <command> [flags]
 # or, if linked on your PATH:
-pg-delta-next <command> [flags]
+pgdelta <command> [flags]
 ```
 
-`pg-delta-next help` prints the command list. Exit codes: **0** success,
+`pgdelta help` prints the command list. Exit codes: **0** success,
 **1** runtime failure (or drift detected), **2** bad arguments.
 
 ### Flow 1 — migrate one database to match another
 
 ```bash
 # 1. See what would change (human-readable)
-pg-delta-next diff --source "$SOURCE_URL" --desired "$DESIRED_URL"
+pgdelta diff --source "$SOURCE_URL" --desired "$DESIRED_URL"
 
 # 2. Produce a plan artifact (JSON)
-pg-delta-next plan --source "$SOURCE_URL" --desired "$DESIRED_URL" --out plan.json
+pgdelta plan --source "$SOURCE_URL" --desired "$DESIRED_URL" --out plan.json
 
 # 3. (recommended) Prove it on a sacrificial clone of the source
-pg-delta-next snapshot --source "$DESIRED_URL" --out desired.snapshot
-pg-delta-next prove --plan plan.json --clone "$CLONE_URL" --desired-snapshot desired.snapshot
+pgdelta snapshot --source "$DESIRED_URL" --out desired.snapshot
+pgdelta prove --plan plan.json --clone "$CLONE_URL" --desired-snapshot desired.snapshot
 
 # 4. Apply to the real target (fingerprint-gated against the source it was planned from)
-pg-delta-next apply --plan plan.json --target "$SOURCE_URL"
+pgdelta apply --plan plan.json --target "$SOURCE_URL"
 ```
 
 `plan` writes the JSON plan to stdout (or `--out <file>`) and a summary
@@ -90,7 +89,7 @@ loads them into a **shadow** database, extracts that as the desired state, and
 migrates the target to match:
 
 ```bash
-pg-delta-next schema apply \
+pgdelta schema apply \
   --dir ./schema \
   --shadow "$SHADOW_URL" \   # a fresh, empty database the files are loaded into
   --target "$TARGET_URL"     # the database to migrate
@@ -99,7 +98,7 @@ pg-delta-next schema apply \
 Export the inverse — a live database back out to `.sql` files:
 
 ```bash
-pg-delta-next schema export --source "$SOURCE_URL" --out-dir ./schema
+pgdelta schema export --source "$SOURCE_URL" --out-dir ./schema
 # --layout by-object (default) groups by schema/kind; --layout ordered emits a
 # single load order with the load(export(db)) ≡ db guarantee
 #
@@ -114,7 +113,7 @@ pg-delta-next schema export --source "$SOURCE_URL" --out-dir ./schema
 # --format-options pretty-prints the exported SQL (any layout; off by default):
 #   --format-options '{"keywordCase":"upper","maxWidth":180}'
 # It is cosmetic — the load(export(db)) ≡ db guarantee still holds. The same
-# formatter is available as a library helper at @supabase/pg-delta-next/sql-format
+# formatter is available as a library helper at @supabase/pg-delta/sql-format
 # (formatSqlStatements).
 ```
 
@@ -125,8 +124,8 @@ pg-delta-next schema export --source "$SOURCE_URL" --out-dir ./schema
 ### Detect drift from a saved snapshot
 
 ```bash
-pg-delta-next snapshot --source "$PROD_URL" --out prod.snapshot   # capture once
-pg-delta-next drift --env "$PROD_URL" --snapshot prod.snapshot    # later: did it change?
+pgdelta snapshot --source "$PROD_URL" --out prod.snapshot   # capture once
+pgdelta drift --env "$PROD_URL" --snapshot prod.snapshot    # later: did it change?
 ```
 
 `drift` exits **0** when the environment still matches the snapshot, **1** when it
@@ -162,7 +161,7 @@ Common flags, explained:
 ## Programmatic API
 
 The package ships TypeScript source via subpath exports. The everything-entry is
-`@supabase/pg-delta-next`; each stage is also importable on its own
+`@supabase/pg-delta`; each stage is also importable on its own
 (`/extract`, `/plan`, `/apply`, `/proof`, `/frontends`, `/core`, `/policy`,
 `/integrations`).
 
@@ -172,9 +171,9 @@ It takes [`pg`](https://node-postgres.com/) `Pool`s as input.
 
 ```ts
 import { Pool } from "pg";
-import { extract } from "@supabase/pg-delta-next/extract";
-import { plan } from "@supabase/pg-delta-next/plan";
-import { apply } from "@supabase/pg-delta-next/apply";
+import { extract } from "@supabase/pg-delta/extract";
+import { plan } from "@supabase/pg-delta/plan";
+import { apply } from "@supabase/pg-delta/apply";
 
 const source = new Pool({ connectionString: SOURCE_URL });
 const desired = new Pool({ connectionString: DESIRED_URL });
@@ -196,7 +195,7 @@ if (report.status !== "applied") throw new Error(report.error?.message);
 ### Prove before you trust it
 
 ```ts
-import { provePlan } from "@supabase/pg-delta-next/proof";
+import { provePlan } from "@supabase/pg-delta/proof";
 
 // clonePool is a throwaway copy of the source; it WILL be mutated
 const verdict = await provePlan(thePlan, clonePool, desiredFb);
@@ -210,7 +209,7 @@ if (!verdict.ok) {
 ### Flow 2 — declarative `.sql` files
 
 ```ts
-import { loadSqlFiles, exportSqlFiles } from "@supabase/pg-delta-next/frontends";
+import { loadSqlFiles, exportSqlFiles } from "@supabase/pg-delta/frontends";
 
 // load .sql files into a fresh shadow DB → desired fact base
 const { factBase: desiredFb, rounds, diagnostics } = await loadSqlFiles(
@@ -227,8 +226,8 @@ const files = exportSqlFiles(sourceFb, { layout: "by-object" });
 ### Persisting plans and snapshots
 
 ```ts
-import { serializePlan, parsePlan } from "@supabase/pg-delta-next/plan";
-import { saveSnapshot, loadSnapshot } from "@supabase/pg-delta-next/frontends";
+import { serializePlan, parsePlan } from "@supabase/pg-delta/plan";
+import { saveSnapshot, loadSnapshot } from "@supabase/pg-delta/frontends";
 
 const json = serializePlan(thePlan);     // plan ↔ JSON round-trips losslessly
 const restored = parsePlan(json);
@@ -258,7 +257,7 @@ applier can actually execute. The same profile is threaded through extract → p
 → prove → apply, so *what you prove is exactly what you run*.
 
 ```ts
-import { resolveProfile } from "@supabase/pg-delta-next/integrations";
+import { resolveProfile } from "@supabase/pg-delta/integrations";
 
 const ctx = await resolveProfile(targetPool, "supabase");
 const { factBase } = await ctx.extract(targetPool);
@@ -297,5 +296,5 @@ On the CLI this is just `--profile supabase`.
 | Why the engine was rebuilt | [overview.md](overview.md) |
 | How it works, conceptually | [architecture/README.md](architecture/README.md) |
 | The full design (the north star) | [architecture/target-architecture.md](architecture/target-architecture.md) |
-| What it models / deliberately excludes | [../packages/pg-delta-next/COVERAGE.md](../packages/pg-delta-next/COVERAGE.md) |
+| What it models / deliberately excludes | [../packages/pg-delta/COVERAGE.md](../packages/pg-delta/COVERAGE.md) |
 | What's left before v1 | [roadmap/v1.md](roadmap/v1.md) |

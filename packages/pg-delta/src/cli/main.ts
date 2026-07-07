@@ -54,7 +54,7 @@ import {
 } from "./commands/schema.ts";
 
 const USAGE = `
-pg-delta-next <command> [options]
+pgdelta <command> [options]
 
 Commands:
   plan           --source <pg-url> --desired <pg-url>

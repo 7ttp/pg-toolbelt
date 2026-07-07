@@ -25,12 +25,12 @@ Execution order then becomes fragile:
 runtime-only cases, so consumers must treat its order and diagnostics as a
 best-effort aid, not a guarantee.
 
-Its primary consumer is [`@supabase/pg-delta-next`](../pg-delta-next), which uses
+Its primary consumer is [`@supabase/pg-delta`](../pg-delta), which uses
 it as the **statement reordering assist for shadow loading**: it splits and
 pre-sorts declarative SQL files so an ephemeral shadow database converges in
 fewer rounds, while Postgres remains the actual elaborator
 ([target-architecture §4.4.1](../../docs/architecture/target-architecture.md)).
-pg-delta-next declares pg-topo an _optional peer dependency_ and loads it through
+pg-delta declares pg-topo an _optional peer dependency_ and loads it through
 a guarded dynamic `import()`, so the assist degrades cleanly when pg-topo is
 absent — it can only fail to _build_ the shadow (a visible error), never corrupt
 the extracted schema.

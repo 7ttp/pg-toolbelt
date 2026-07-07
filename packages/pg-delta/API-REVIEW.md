@@ -1,4 +1,4 @@
-# API Review — `@supabase/pg-delta-next` public exports
+# API Review — `@supabase/pg-delta` public exports
 
 Stage-9 deliverable 8. Every name exported from `src/index.ts` reviewed
 name-by-name. Architecture vocabulary check: **facts** / **deltas** /

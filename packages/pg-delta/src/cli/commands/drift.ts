@@ -24,7 +24,7 @@ export async function cmdDrift(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next drift --env <pg-url> --snapshot <file> [--strict-coverage] [--unsafe-show-secrets]\n`,
+        `${err.message}\nUsage: pgdelta drift --env <pg-url> --snapshot <file> [--strict-coverage] [--unsafe-show-secrets]\n`,
       );
       process.exit(2);
     }

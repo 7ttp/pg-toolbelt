@@ -26,7 +26,7 @@ import type { RenameMode } from "../../plan/renames.ts";
 import { writeFileSync } from "node:fs";
 
 const USAGE =
-  "Usage: pg-delta-next plan --source <pg-url> --desired <pg-url> " +
+  "Usage: pgdelta plan --source <pg-url> --desired <pg-url> " +
   `[--profile ${PROFILE_IDS}] ` +
   "[--renames auto|prompt|off] [--no-compact] [--out <plan.json>] " +
   "[--accept-rename <from>=<to>] ... [--restrict-to-applier] [--strict-coverage] " +

@@ -12,7 +12,7 @@
  * `pg_export_snapshot()` are a later optimization; serial is the documented
  * fallback and plenty fast at current scale.)
  *
- * Kind coverage is the full v1 set — see packages/pg-delta-next/COVERAGE.md for
+ * Kind coverage is the full v1 set — see packages/pg-delta/COVERAGE.md for
  * the authoritative list (schemas, roles + memberships, extensions, tables and
  * their sub-facts, foreign tables + their constraints, domains, types, indexes,
  * sequences, views, materialized views, procedures/aggregates, collations,

@@ -76,7 +76,7 @@ export async function cmdProve(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next prove --plan <plan.json> --clone <pg-url> --desired-snapshot <file> [--profile ${PROFILE_IDS}]\n`,
+        `${err.message}\nUsage: pgdelta prove --plan <plan.json> --clone <pg-url> --desired-snapshot <file> [--profile ${PROFILE_IDS}]\n`,
       );
       process.exit(2);
     }

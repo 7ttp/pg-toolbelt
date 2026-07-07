@@ -21,7 +21,7 @@ export async function cmdSnapshot(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next snapshot --source <pg-url> --out <file> [--strict-coverage] [--unsafe-show-secrets]\n`,
+        `${err.message}\nUsage: pgdelta snapshot --source <pg-url> --out <file> [--strict-coverage] [--unsafe-show-secrets]\n`,
       );
       process.exit(2);
     }

@@ -6,7 +6,7 @@
  * The headline safe path (`resolveProfile` + presets) is reachable from the
  * package root; the full profile surface (capability probing, handlers,
  * custom-profile building blocks) is reachable from the
- * `@supabase/pg-delta-next/integrations` subpath, which package.json declares.
+ * `@supabase/pg-delta/integrations` subpath, which package.json declares.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

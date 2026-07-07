@@ -28,7 +28,7 @@ export async function cmdApply(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next apply --plan <plan.json> --target <pg-url> [--profile ${PROFILE_IDS}] [--force]\n`,
+        `${err.message}\nUsage: pgdelta apply --plan <plan.json> --target <pg-url> [--profile ${PROFILE_IDS}] [--force]\n`,
       );
       process.exit(2);
     }

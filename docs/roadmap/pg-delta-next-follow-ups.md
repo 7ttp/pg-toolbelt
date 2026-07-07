@@ -122,7 +122,7 @@ pg-delta's own unused code, which a pg-topo change cannot affect.
 
 ### Changesets version a private package — ✅ resolved in this PR
 
-55 changesets target `@supabase/pg-delta-next`, which is `"private": true` /
+55 changesets target `@supabase/pg-delta`, which is `"private": true` /
 `0.0.0`. The repo is in changeset pre-release (alpha) mode and
 `.changeset/pre.json`'s `initialVersions` doesn't list pg-delta-next, so
 `changeset status` planned a **minor** bump for it — the release workflow would
@@ -130,7 +130,7 @@ have consumed all 55 into a `chore: release` PR that bumps the unpublishable
 package and writes a large CHANGELOG (`changeset publish` skips private packages,
 so this was churn, not breakage).
 
-**Fixed:** added `@supabase/pg-delta-next` to `.changeset/config.json` `ignore`.
+**Fixed:** added `@supabase/pg-delta` to `.changeset/config.json` `ignore`.
 This is safe and non-destructive — all 55 changesets are standalone (they
 reference no other package) and no published package depends on pg-delta-next, so
 `ignore` neither errors nor cascades. The changesets are preserved (ignored

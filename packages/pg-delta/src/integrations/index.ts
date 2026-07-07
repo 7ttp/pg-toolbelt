@@ -1,5 +1,5 @@
 /**
- * Integration profile API (the `@supabase/pg-delta-next/integrations` subpath).
+ * Integration profile API (the `@supabase/pg-delta/integrations` subpath).
  *
  * The safe, supported surface for managing a profile-scoped view: resolve a
  * profile against a source pool, then route extract / plan / prove / apply

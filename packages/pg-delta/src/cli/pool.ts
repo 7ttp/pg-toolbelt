@@ -5,7 +5,7 @@
 import createDebug from "debug";
 import pg from "pg";
 
-const log = createDebug("pg-delta-next:pool");
+const log = createDebug("pgdelta:pool");
 
 export interface ManagedPool {
   pool: pg.Pool;
@@ -26,7 +26,7 @@ export function makePool(url: string, label?: string): ManagedPool {
   const pool = new pg.Pool({ connectionString: url, max: 5 });
   const lbl = label ?? safeLabel(url);
   // Don't crash on an idle client error (server restart, network drop), but
-  // surface it under DEBUG=pg-delta-next:* instead of swallowing it silently —
+  // surface it under DEBUG=pgdelta:* instead of swallowing it silently —
   // these are exactly the failures worth seeing when troubleshooting (P3). The
   // label carries no credentials.
   pool.on("error", (err: unknown) => {

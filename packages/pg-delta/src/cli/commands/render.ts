@@ -16,7 +16,7 @@ import { parseFlags, UsageError } from "../flags.ts";
 import { renderPlan } from "../render.ts";
 
 const USAGE =
-  "Usage: pg-delta-next render --plan <plan.json> --out <base>.sql [--allow-drops]\n";
+  "Usage: pgdelta render --plan <plan.json> --out <base>.sql [--allow-drops]\n";
 
 /** Given "--out" value, split into base + ".sql" ext. Strips a trailing
  *  ".sql" if present; otherwise treats the whole value as the base. */

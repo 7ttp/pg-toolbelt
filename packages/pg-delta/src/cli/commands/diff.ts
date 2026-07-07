@@ -48,7 +48,7 @@ export async function cmdDiff(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next diff --source <pg-url> --desired <pg-url> [--strict-coverage] [--unsafe-show-secrets]\n`,
+        `${err.message}\nUsage: pgdelta diff --source <pg-url> --desired <pg-url> [--strict-coverage] [--unsafe-show-secrets]\n`,
       );
       process.exit(2);
     }

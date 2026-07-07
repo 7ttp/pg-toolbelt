@@ -1,6 +1,6 @@
 /**
  * Frontends barrel: the three public frontend modules.
- * Consumers can import from "@supabase/pg-delta-next/frontends" for all
+ * Consumers can import from "@supabase/pg-delta/frontends" for all
  * frontend utilities, or from the sub-path imports for tree-shaking.
  */
 export {

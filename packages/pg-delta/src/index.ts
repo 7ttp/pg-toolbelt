@@ -1,5 +1,5 @@
 /**
- * @supabase/pg-delta-next — clean-room rebuild per docs/architecture/target-architecture.md.
+ * @supabase/pg-delta — clean-room rebuild per docs/architecture/target-architecture.md.
  * Public API per §4.5; the complete vocabulary is listed here and reviewed
  * in API-REVIEW.md (stage-9 deliverable 8).
  */
@@ -94,7 +94,7 @@ export { supabasePolicy } from "./policy/supabase.ts";
 // route extract / plan / prove / apply through the resolved option bundles so
 // they reconstruct the same view (plan == prove == apply). The full surface
 // (handlers, capability probing, custom-profile building blocks) lives on the
-// `@supabase/pg-delta-next/integrations` subpath.
+// `@supabase/pg-delta/integrations` subpath.
 export {
   resolveProfile,
   rawProfile,

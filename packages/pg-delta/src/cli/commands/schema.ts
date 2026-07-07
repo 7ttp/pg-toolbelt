@@ -190,7 +190,7 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next schema export --source <pg-url> --out-dir <dir> ` +
+        `${err.message}\nUsage: pgdelta schema export --source <pg-url> --out-dir <dir> ` +
           `[--layout by-object|ordered|grouped] [--profile ${PROFILE_IDS}] [--strict-coverage] [--unsafe-show-secrets] [--scope database|cluster]\n` +
           `  [--format-options '{"keywordCase":"upper","maxWidth":180}']  (pretty-print SQL; any layout)\n` +
           `  Grouped-layout options (only with --layout grouped):\n` +
@@ -488,7 +488,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next schema apply --dir <dir> --target <pg-url> [--shadow <pg-url>] ` +
+        `${err.message}\nUsage: pgdelta schema apply --dir <dir> --target <pg-url> [--shadow <pg-url>] ` +
           `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... ` +
           `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--strict-coverage] [--no-reorder] [--unsafe-show-secrets] [--isolated-shadow] [--scope database|cluster] [--skip-cluster-ddl] [--keep-shadow]\n` +
           `  --shadow omitted: a co-located shadow database is created on the target's cluster (database scope only) and dropped after.\n`,
@@ -1047,7 +1047,7 @@ export async function cmdSchemaLint(args: string[]): Promise<void> {
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
-        `${err.message}\nUsage: pg-delta-next schema lint --dir <dir>\n`,
+        `${err.message}\nUsage: pgdelta schema lint --dir <dir>\n`,
       );
       process.exit(2);
     }

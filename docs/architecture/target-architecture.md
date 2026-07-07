@@ -649,7 +649,7 @@ workflow exists to provide, and a regression in the rewrite.
 **Trust posture.** The assist is the developer-experience layer of §4.4, not a
 trusted component. pg-topo is loaded through a guarded dynamic `import()` and
 declared an *optional peer dependency*; merely importing the core never pulls
-the libpg-query WASM parser — only calling the `@supabase/pg-delta-next/sql-order`
+the libpg-query WASM parser — only calling the `@supabase/pg-delta/sql-order`
 subpath does. Reorder is always-on in pg-delta-next's own CLI (`schema apply`,
 with `--no-reorder` to reproduce raw file granularity); other consumers
 (supabase/cli) opt in by adding pg-topo themselves and calling the subpath.

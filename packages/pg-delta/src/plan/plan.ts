@@ -131,7 +131,7 @@ export interface PlanOptions {
    *  FDW ACLs for a non-superuser) are projected out of the view. Supplied by
    *  the resolved profile (`resolveProfile(pool, profile, { restrictToApplier:
    *  true })`), or probe directly with `probeApplierCapability` from
-   *  `@supabase/pg-delta-next/integrations`. Default unrestricted. */
+   *  `@supabase/pg-delta/integrations`. Default unrestricted. */
   capability?: ApplierCapability;
   /** the integration profile id to stamp on the plan artifact (set by the
    *  resolved profile's `planOptions`), so `apply`/`prove` can reconstruct the

@@ -1,9 +1,11 @@
-# @supabase/pg-delta-next
+# @supabase/pg-delta
 
-Clean-room rebuild of pg-delta per [`docs/architecture/target-architecture.md`](../../docs/architecture/target-architecture.md)
+A clean-room rebuild of the PostgreSQL schema-diff engine, per
+[`docs/architecture/target-architecture.md`](../../docs/architecture/target-architecture.md)
 (see [the build log](../../docs/build-log.md) for how it was built, stage by
-stage). **Working name** — final naming is a stage-10 product decision. Private
-until the cutover parity bar.
+stage). This is the published `@supabase/pg-delta` package; the CLI binary is
+`pgdelta`. It replaced the legacy engine in a hard breaking-change alpha
+release.
 
 > **Using it?** See [docs/getting-started.md](../../docs/getting-started.md) for
 > the CLI and the programmatic API.
@@ -34,7 +36,7 @@ it still loads" by splitting files into one-statement units and topologically
 pre-sorting them (via `@supabase/pg-topo`) before the loader runs. See
 [target-architecture §4.4.1](../../docs/architecture/target-architecture.md).
 
-- **Subpath:** `@supabase/pg-delta-next/sql-order` exposes
+- **Subpath:** `@supabase/pg-delta/sql-order` exposes
   `orderForShadow(files)` / `analyzeForShadow(files)` (returning single-statement
   `SqlFile`s ready to feed straight into `loadSqlFiles`), `canReorder()`, and the
   typed `ReorderUnavailableError`.
@@ -112,7 +114,7 @@ All engineering stages are implemented:
   loads in a single pass, and a "grouped" layout that restores the old
   engine's category-grouped/readable output with opt-in name-pattern,
   flat-schema, and partition grouping; opt-in SQL pretty-printing via
-  `--format-options`, also exposed as the `@supabase/pg-delta-next/sql-format`
+  `--format-options`, also exposed as the `@supabase/pg-delta/sql-format`
   library helper), drift, finalized public API (subpath
   exports, reviewed name-by-name in `API-REVIEW.md`), CLI v2.
 
