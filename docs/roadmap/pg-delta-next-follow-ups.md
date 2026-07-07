@@ -499,3 +499,39 @@ Extract-completeness (invisible drift / wrong from-empty replay):
 - **subscription `failover`** — `src/extract/publications.ts:135` (comment `3537910587`).
   The version-gated subscription option list stops at `run_as_owner`/`origin`; a
   `failover`-only difference hashes identically and from-empty replay omits it.
+
+### Wave 4 (re-review of `bd68f7b`) — apply-ordering / access / shadow
+
+New findings only (multiple-inheritance parents `3538433909` and window-function deps
+`3538433920` are re-issues of `3536715681` / `3536715714` above).
+
+Apply ordering / cascade (plan can fail at apply):
+
+- **release old sequence owner before dropping it** — `src/plan/rules/sequences.ts:117`
+  (comment `3538433876`). Retargeting an `OWNED BY` sequence to a new column while the
+  old column/table is dropped in the same plan: the alter consumes only the new owner;
+  the extractor drops the sequence→old-column auto-dep and drops sort before alters, so
+  the old table (and its owned sequence) can be dropped first → the later
+  `ALTER SEQUENCE … OWNED BY` fails. Order via the `from` owned-by value.
+- **order in-place alters after new dependencies** — `src/plan/internal.ts:184` (comment
+  `3538433892`). An ALTER that makes a surviving fact depend on a newly-created object
+  (column → new enum/domain, default → new function) only consumes the existing fact and
+  isn't in `produces`, so the desired dependency edge is never walked → the ALTER can
+  sort before the CREATE and fail. Walk desired edges for altered subjects (or make the
+  alter consume the new target).
+- **move extensions before dropping their old schema** — `src/plan/rules/schemas.ts:81`
+  (comment `3538433899`). A relocatable extension moving `old`→`new` while `old` is
+  dropped: the alter consumes only `new` and never releases `old`, so `DROP SCHEMA old`
+  can run while members are still there and fail. Order the move via the `from` schema.
+
+Access / shadow correctness:
+
+- **subscription conninfo read as non-superuser** — `src/extract/publications.ts:139`
+  (comment `3538433886`). The unconditional `subconninfo` select fails for normal users
+  (PostgreSQL revokes that column) before redaction can help — a non-superuser diff
+  aborts in subscription extraction. Guard by privilege; diagnostic/placeholder instead.
+- **shadow emptiness check misses non-relation objects** —
+  `src/frontends/load-sql-files.ts:459` (comment `3538433916`). The guard checks only
+  `pg_class`, so a shadow pre-loaded with enums/domains/routines/collations/extensions/
+  default-privileges is treated as empty; the load then extracts that pre-existing state
+  as if it were declared, contaminating the desired fact base. Cover all managed catalogs.
