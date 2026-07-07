@@ -411,3 +411,45 @@ attachments (`3536715689`), non-relocatable extension `SET SCHEMA` (`3536715698`
 enum metadata restore after value-set rebuild (`3536715704`), partial default-privilege
 reset before grants (`3536715708`), window-function dependency resolution `prokind='w'`
 (`3536715714`), publication-member rebuild on table replace (`3536715717`).
+
+### Wave 2 (re-review of commit `ada0ab5`) — more of the same track
+
+Planning / export / apply fidelity:
+
+- **typed-table `OF` relationships** — `src/plan/rules/tables.ts:64` (comment
+  `3537805071`). A `CREATE TABLE ... OF composite_type` renders as an ordinary
+  `CREATE TABLE (...)`; the only catalog difference is a depends-edge (which emits no
+  DDL), so typedness-only changes no-op and from-empty plans recreate typed tables as
+  ordinary ones. Needs a `pg_class.reloftype` marker on the payload to drive replace.
+- **by-object export FK atomicity** — `src/frontends/export-sql-files.ts:388` (comment
+  `3537805092`). By-object export appends every table action to one file, but
+  `loadSqlFiles` applies each file atomically; for mutually-dependent FKs the plan is
+  correctly ordered but regrouped so each file's FK references the other's not-yet-
+  committed table → both roll back. Keep FK alters in dependency-order runs / separate
+  files to preserve the by-object fidelity contract.
+- **policy `TO`-role release before DROP ROLE** — `src/plan/rules/policies.ts:56`
+  (comment `3537805111`). When a policy's `TO` list drops a role in the same plan, the
+  `ALTER POLICY ... TO ...` neither releases nor consumes the old role; policy role
+  refs are shared deps (not `pg_depend` edges), so the graph may run `DROP ROLE` first
+  and fail. (Same family as the `elideCascadeSubsumedPolicyDrops` item above.)
+
+Extract-completeness / coverage (invisible drift):
+
+- **ICU collation rules** — `src/extract/types.ts:298` (comment `3537805075`).
+  `pg_collation.collicurules` isn't hashed, so a `RULES`-only difference compares equal
+  and from-empty emits `CREATE COLLATION` without the rules.
+- **user-defined conversions unmodeled** — `src/extract/unmodeled.ts:62` (comment
+  `3537805081`). The completeness probe omits `pg_conversion`, so a `CREATE CONVERSION`
+  yields neither a fact nor an `unmodeled_kind` diagnostic — strict coverage silently
+  ignores it.
+- **extension-member columns dropped from the reference view** —
+  `src/extract/relations.ts:138` (comment `3537805086`). The anti-join skips column
+  facts of an ext-owned table even when the table is kept as a member, so column
+  satellites (comment/seclabel) and column-level edges dangle. Keep columns as
+  reference-only descendants.
+- **column-level privileges** — `src/extract/relations.ts:129` (comment `3537805098`).
+  `pg_attribute.attacl` (`GRANT SELECT (col)`) isn't emitted as an `acl` satellite, so
+  column-grant-only diffs are invisible and from-empty exports drop them.
+- **role comments in cluster scope** — `src/extract/roles.ts:32` (comment `3537805102`).
+  Cluster-scope role facts never emit a comment satellite, so `COMMENT ON ROLE` drift is
+  invisible and from-empty cluster exports omit it (the renderer already supports it).
