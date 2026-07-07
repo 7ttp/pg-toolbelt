@@ -368,10 +368,15 @@ to **replace**" pattern already used for policy clause removal (`d2cdbf7`).
   `TYPE <enum> USING col::text::<enum>` instead of the column's desired array type —
   plan fails / would scalarize the column. Use each dependent column fact's desired
   type/cast, not the enum `relName` unconditionally.
-- **reference-only export member under a managed non-public schema** —
-  `src/frontends/export-sql-files.ts:359` (comment `3537607461`). Member seeded into
+- **reference-only export member under a managed non-public schema** — ✅ **resolved**
+  `src/frontends/export-sql-files.ts` (comment `3537607461`). Member seeded into
   the pristine baseline without its schema parent → `buildFactBase` missing-parent
-  throw before any file renders. Seed the ancestor chain with the reference-only facts.
+  throw before any file renders. **Fix:** exclude extension members from the export
+  baseline (via `extensionMemberReferenceOnly`) — they never need seeding
+  (`CREATE EXTENSION` materializes them; the requirement guard's
+  `memberExtensionPresent` satisfies any consumer), and the managed install schema
+  is still exported so the result reloads. Regression:
+  `tests/export-extension-member-parent.test.ts`.
 - **user mapping on a filtered extension-owned server** — `src/extract/foreign.ts:91`
   (comment `3537607477`). Ext-owned servers are anti-joined out, but `pg_user_mapping`
   rows still emit and parent to an absent `server` fact → missing-parent throw. Filter

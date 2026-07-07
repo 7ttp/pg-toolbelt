@@ -17,6 +17,7 @@ import { buildFactBase, type FactBase } from "../core/fact.ts";
 import { encodeId, type StableId } from "../core/stable-id.ts";
 import { plan, type Action } from "../plan/plan.ts";
 import type { IntentRuleIndex } from "../plan/rules.ts";
+import { extensionMemberReferenceOnly } from "../policy/view.ts";
 import type { SqlFile } from "./load-sql-files.ts";
 import {
   formatSqlStatements,
@@ -350,11 +351,26 @@ export function exportSqlFiles(
   //     resolves its requirement against the baseline instead of throwing
   //     "missing requirement", and the assumed parent is not itself recreated
   //     (review #3501088189).
+  //
+  //     EXCEPT extension members (net.http_get, partman.part_config): they must
+  //     NOT be seeded. A member's parent — the install schema — can be a MANAGED
+  //     fact this export recreates (e.g. `partman`); seeding the member without
+  //     its ancestor throws "missing parent" in buildFactBase (Codex #3537607461),
+  //     and seeding the ancestor too would suppress its own CREATE SCHEMA
+  //     (buildFactBase seeds existence → diff skips it), breaking `CREATE EXTENSION
+  //     … WITH SCHEMA` reload. Members need no seeding regardless: `CREATE EXTENSION`
+  //     materializes them and the planner's requirement guard satisfies any
+  //     consumer via `memberExtensionPresent` (a member satellite — a user
+  //     GRANT/COMMENT on a member — still exports, its requirement met the same
+  //     way). Assumed-schema facts stay seeded: that category is parent-closed
+  //     (the schema fact is itself reference-only), so no dangling parent arises.
+  const members = extensionMemberReferenceOnly(fb);
   const pristine = fb.facts().filter((fact) => {
     const id = fact.id;
     if (id.kind === "schema" && (id as { name: string }).name === "public")
       return true;
-    return fb.referenceOnly.has(encodeId(id));
+    const key = encodeId(id);
+    return fb.referenceOnly.has(key) && !members.has(key);
   });
   const baseline = buildFactBase(pristine, []);
   // `fb` is the already-resolved managed view, so we do NOT re-run policy
