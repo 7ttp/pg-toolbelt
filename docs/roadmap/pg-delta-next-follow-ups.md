@@ -458,3 +458,44 @@ Extract-completeness / coverage (invisible drift):
 - **role comments in cluster scope** — `src/extract/roles.ts:32` (comment `3537805102`).
   Cluster-scope role facts never emit a comment satellite, so `COMMENT ON ROLE` drift is
   invisible and from-empty cluster exports omit it (the renderer already supports it).
+
+### Wave 3 (re-reviews of `671a799` / `5e26a52`) — more extract-completeness / replace-cascade
+
+Only the findings NOT already listed above (Codex re-issues the earlier ones — role
+membership options, db-scoped GUCs, unlogged sequences, matview populated, range
+CANONICAL, foreign-column `attfdwoptions` — with fresh comment_ids each pass).
+
+Replace / apply cascade:
+
+- **FDW server children rebuild on replace** — `src/plan/rules/foreign.ts:81` (comment
+  `3537910549`). When `type`/`fdw` changes on a server that still has foreign tables,
+  marking the server `replace` emits only the server drop/create; PostgreSQL rejects
+  `DROP SERVER` while dependent foreign tables/user mappings exist → apply fails.
+  Rebuild the dependents explicitly or use a cascade/recreate path.
+
+Extract-completeness (invisible drift / wrong from-empty replay):
+
+- **composite attribute order** — `src/extract/types.ts:185` (comment `3537910546`).
+  Composite attrs are keyed by name and hash only type/collation, and from-empty render
+  sorts by encoded id, not `attnum` — a field-order-only difference compares equal and
+  can recreate the type with a different row layout. Carry `attnum`; render in order.
+- **comments on constraint-backed indexes** — `src/extract/relations.ts:272` (comment
+  `3537910554`). The index anti-join drops the index fact for a PK/unique/exclusion
+  constraint, and the constraint extractor reads only `pg_constraint` comments, so a
+  `COMMENT ON INDEX` on that index is lost.
+- **table tablespaces** — `src/extract/relations.ts:82` (comment `3537910560`).
+  `pg_class.reltablespace` isn't hashed and no create/alter renders `TABLESPACE`;
+  tablespace-only diffs no-op and from-empty replay uses the default tablespace.
+- **table access methods** — `src/extract/relations.ts:36` (comment `3537910571`).
+  `pg_class.relam` (`CREATE TABLE … USING …`) isn't recorded; AM-only diffs compare
+  equal and from-empty replay uses the default table AM.
+- **column storage metadata** — `src/extract/relations.ts:100` (comment `3537910575`).
+  `SET STORAGE` / `SET COMPRESSION` / `SET STATISTICS` (on `pg_attribute`) aren't
+  extracted or rendered; those-only diffs are invisible and from-empty replay uses
+  defaults.
+- **role `VALID UNTIL`** — `src/extract/roles.ts:30` (comment `3537910580`). The
+  password-expiry attribute isn't on the role payload; a login role differing only by
+  expiry compares equal and from-empty cluster export drops it.
+- **subscription `failover`** — `src/extract/publications.ts:135` (comment `3537910587`).
+  The version-gated subscription option list stops at `run_as_owner`/`origin`; a
+  `failover`-only difference hashes identically and from-empty replay omits it.
