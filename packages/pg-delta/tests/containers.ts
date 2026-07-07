@@ -256,6 +256,37 @@ export async function supabaseCluster(): Promise<Cluster> {
   return supabaseShared;
 }
 
+/** A fresh, standalone Supabase-image container (its own cluster, NOT the shared
+ *  singleton). The dbdev-roundtrip fixture needs two independent containers
+ *  because Supabase only permits CREATE EXTENSION in the `postgres` database,
+ *  so the shared cluster's per-test databases won't do. Connects as
+ *  `supabase_admin`, matching the committed base-init fixture. */
+export interface StartedStandaloneSupabase {
+  connectionUri(db?: string): string;
+  stop(): Promise<void>;
+}
+
+export async function startStandaloneSupabase(): Promise<StartedStandaloneSupabase> {
+  const container = await new GenericContainer(SUPABASE_IMAGE)
+    .withEnvironment({
+      POSTGRES_USER: "supabase_admin",
+      POSTGRES_PASSWORD: "postgres",
+      POSTGRES_DB: "postgres",
+    })
+    .withExposedPorts(5432)
+    .withWaitStrategy(Wait.forHealthCheck())
+    .withStartupTimeout(180_000)
+    .withTmpFs({ "/var/lib/postgresql/data": "rw,noexec,nosuid,size=512m" })
+    .start();
+  return {
+    connectionUri: (db = "postgres") =>
+      `postgres://supabase_admin:postgres@${container.getHost()}:${container.getMappedPort(5432)}/${db}`,
+    stop: async () => {
+      await container.stop();
+    },
+  };
+}
+
 /** The security-label end-to-end proof needs a loaded label provider. We build
  *  a `postgres:<major>-alpine` image with the `dummy_seclabel` test module
  *  compiled in (tests/dummy-seclabel.Dockerfile) and preload it. Sandboxes that

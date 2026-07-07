@@ -6,15 +6,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Pool } from "pg";
 import pg from "pg";
+import { startStandaloneSupabase } from "../../tests/containers.ts";
+import { applySupabaseBaseInit as replaySupabaseBaseInit } from "../../tests/supabase-base-init.ts";
 
-const MIGRATIONS_DIR = join(
-  new URL(
-    "../../../pg-delta/tests/integration/fixtures/dbdev-migrations/migrations/",
-    import.meta.url,
-  ).pathname,
-);
-
-const SUPABASE_PG15_TAG = "15.14.1.107";
+const MIGRATIONS_DIR = new URL(
+  "../../tests/fixtures/dbdev-migrations/migrations/",
+  import.meta.url,
+).pathname;
 
 export type DbdevMigrationScope = "core" | "all";
 
@@ -137,25 +135,13 @@ function makeTemplateCloneSource(
   };
 }
 
-type SupabaseContainer = {
-  getConnectionUri(): string;
-  stop(): Promise<void>;
-};
-
-type SupabaseContainerCtor = new (image: string) => {
-  start(): Promise<SupabaseContainer>;
-};
-
 /** Fresh container with supabase base-init — required for main roundtrip apply-check
  *  because Supabase only allows CREATE EXTENSION in the `postgres` database. */
-function makeFreshMainCloneSource(
-  Container: SupabaseContainerCtor,
-  image: string,
-): DbdevCloneSource {
+function makeFreshMainCloneSource(): DbdevCloneSource {
   return {
     async clone() {
-      const container = await new Container(image).start();
-      const uri = container.getConnectionUri();
+      const container = await startStandaloneSupabase();
+      const uri = container.connectionUri();
       const setupPool = createSetupPool(uri);
       const pool = createPostgresRolePool(uri);
       try {
@@ -180,45 +166,37 @@ function makeFreshMainCloneSource(
   };
 }
 
+async function waitForPool(pool: Pool): Promise<void> {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      await pool.query("SELECT 1");
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw new Error("Supabase container pool did not become ready");
+}
+
 async function applySupabaseBaseInit(pool: Pool): Promise<void> {
-  const utilsPath = new URL("../../../pg-delta/tests/utils.ts", import.meta.url)
-    .href;
-  const mod = (await import(utilsPath)) as {
-    applySupabaseBaseInit: (pool: Pool, version: 15) => Promise<void>;
-    waitForPool: (pool: Pool) => Promise<void>;
-  };
-  await mod.waitForPool(pool);
-  await mod.applySupabaseBaseInit(pool, 15);
+  await waitForPool(pool);
+  await replaySupabaseBaseInit(pool);
 }
 
 export async function bootstrapDbdevFixture(
   scope: DbdevMigrationScope = "all",
 ): Promise<DbdevFixture> {
-  const containerPath = new URL(
-    "../../../pg-delta/tests/supabase-postgres.ts",
-    import.meta.url,
-  ).href;
-  const { SupabasePostgreSqlContainer } = (await import(containerPath)) as {
-    SupabasePostgreSqlContainer: new (image: string) => {
-      start(): Promise<{
-        getConnectionUri(): string;
-        stop(): Promise<void>;
-      }>;
-    };
-  };
-
-  const image = `supabase/postgres:${SUPABASE_PG15_TAG}`;
   process.stderr.write(
     `[bootstrap-dbdev] starting two Supabase containers (${scope} migrations)…\n`,
   );
 
   const [containerMain, containerBranch] = await Promise.all([
-    new SupabasePostgreSqlContainer(image).start(),
-    new SupabasePostgreSqlContainer(image).start(),
+    startStandaloneSupabase(),
+    startStandaloneSupabase(),
   ]);
 
-  const mainUri = containerMain.getConnectionUri();
-  const branchUri = containerBranch.getConnectionUri();
+  const mainUri = containerMain.connectionUri();
+  const branchUri = containerBranch.connectionUri();
 
   const setupMain = createSetupPool(mainUri);
   const setupBranch = createSetupPool(branchUri);
@@ -256,10 +234,7 @@ export async function bootstrapDbdevFixture(
       get branchPool() {
         return activeBranchPool;
       },
-      mainCloneSource: makeFreshMainCloneSource(
-        SupabasePostgreSqlContainer,
-        image,
-      ),
+      mainCloneSource: makeFreshMainCloneSource(),
       branchCloneSource: makeTemplateCloneSource(
         () => activeSetupBranch,
         (pool) => {
@@ -360,4 +335,4 @@ export async function applyDbdevMigrations(
   return migrations.length;
 }
 
-export { MIGRATIONS_DIR, SUPABASE_PG15_TAG };
+export { MIGRATIONS_DIR };

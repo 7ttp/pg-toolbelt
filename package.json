@@ -5,7 +5,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --filter '*' build",
+    "build": "bun run --filter '@supabase/pg-topo' build && bun run --filter '!@supabase/pg-topo' build",
     "coverage": "bun scripts/coverage.ts",
     "check-types": "bun run --filter '*' check-types",
     "format-and-lint": "oxfmt --check . && oxlint --deny-warnings",
