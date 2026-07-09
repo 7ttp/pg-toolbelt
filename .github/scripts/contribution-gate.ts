@@ -1,15 +1,26 @@
 /**
- * Contribution gate: enforces the pg-toolbelt contribution workflow on pull
- * requests opened by external contributors.
+ * Contribution gate: enforces the pg-toolbelt contribution workflow across all
+ * OPEN pull requests opened by external contributors.
  *
  * A PR passes only when it links to an OPEN GitHub issue that carries the
  * `open-for-contribution` label. Members/collaborators/owners and bots are
  * exempt (they work from Linear tickets or automation). PRs that do not follow
  * the process are commented on and closed.
  *
- * Run in CI as: `bun .github/scripts/contribution-gate.ts`
- * The pure `evaluateGate` decision function is unit-tested in
- * `contribution-gate.test.ts`; `main()` performs the GitHub I/O.
+ * Two modes, both driven from `main()`:
+ *   - single-PR (default): reacts to one PR on `pull_request_target`
+ *     (`opened`/`reopened`/`edited`), using the PR_* env vars from the event.
+ *   - all-PRs sweep (`GATE_MODE=all`, or the `--all` flag): evaluates every
+ *     open PR, for on-demand `workflow_dispatch` runs. Set `DRY_RUN=true` to
+ *     log decisions without commenting/closing.
+ *
+ * In both modes the workflow checks out the base branch, so this only ever
+ * executes trusted repository code — it never runs a fork's code.
+ *
+ * Run in CI as: `bun .github/scripts/contribution-gate.ts`.
+ * The pure `evaluateGate` decision and the `evaluateAllOpenPrs` orchestrator
+ * (I/O injected) are unit-tested in `contribution-gate.test.ts`; `main()` wires
+ * up the real GitHub I/O.
  */
 
 export const GATE_LABEL = "open-for-contribution";
@@ -123,6 +134,55 @@ export function evaluateGate(input: GateInput): GateResult {
   return { pass: false, reason, message: buildMessage(reason) };
 }
 
+/** Minimal open-PR shape the gate needs to decide exemption. */
+export interface OpenPr {
+  number: number;
+  authorAssociation: string;
+  isBot: boolean;
+}
+
+/** Injected GitHub I/O so the sweep can be unit-tested without the network. */
+export interface GateIo {
+  /** List every open pull request in the repository. */
+  listOpenPrs: () => Promise<OpenPr[]>;
+  /** Fetch the issues a PR closes (via `closingIssuesReferences`). */
+  fetchLinkedIssues: (prNumber: number) => Promise<LinkedIssue[]>;
+  /** Comment with `message` then close the PR. Called only for failing PRs. */
+  closePr: (prNumber: number, message: string) => Promise<void>;
+}
+
+export interface SweepEntry {
+  number: number;
+  result: GateResult;
+}
+
+/**
+ * Evaluate the gate against every open PR, closing the ones that fail. Pure
+ * orchestration over the injected `io`; returns each PR's decision so the
+ * caller can log a summary.
+ */
+export async function evaluateAllOpenPrs(
+  io: GateIo,
+  repository: string,
+): Promise<SweepEntry[]> {
+  const openPrs = await io.listOpenPrs();
+  const entries: SweepEntry[] = [];
+  for (const pr of openPrs) {
+    const linkedIssues = await io.fetchLinkedIssues(pr.number);
+    const result = evaluateGate({
+      repository,
+      authorAssociation: pr.authorAssociation,
+      isBot: pr.isBot,
+      linkedIssues,
+    });
+    if (!result.pass && result.message) {
+      await io.closePr(pr.number, result.message);
+    }
+    entries.push({ number: pr.number, result });
+  }
+  return entries;
+}
+
 // --- GitHub I/O (only runs when executed directly) ---
 
 interface GraphQLIssueNode {
@@ -216,15 +276,75 @@ async function fetchLinkedIssues(
   }));
 }
 
-async function main(): Promise<void> {
-  const token = requireEnv("GITHUB_TOKEN");
-  const repository = requireEnv("GITHUB_REPOSITORY");
-  const [owner, repo] = repository.split("/");
+interface RestPullRequest {
+  number: number;
+  author_association: string;
+  user: { type: string } | null;
+}
+
+async function fetchOpenPullRequests(
+  token: string,
+  owner: string,
+  repo: string,
+): Promise<OpenPr[]> {
+  const prs: OpenPr[] = [];
+  for (let page = 1; ; page++) {
+    const url =
+      `https://api.github.com/repos/${owner}/${repo}/pulls` +
+      `?state=open&per_page=100&page=${page}`;
+    const response = await githubFetch(url, token);
+    const batch = (await response.json()) as RestPullRequest[];
+    for (const pr of batch) {
+      prs.push({
+        number: pr.number,
+        authorAssociation: pr.author_association,
+        isBot: pr.user?.type === "Bot",
+      });
+    }
+    if (batch.length < 100) {
+      break;
+    }
+  }
+  return prs;
+}
+
+/**
+ * Build the "comment then close" action for a repo. In dry-run mode it logs the
+ * intended action instead of mutating the PR.
+ */
+function makeCloser(
+  token: string,
+  base: string,
+  dryRun: boolean,
+): (prNumber: number, message: string) => Promise<void> {
+  return async (prNumber, message) => {
+    if (dryRun) {
+      console.log(`[dry-run] would comment on and close PR #${prNumber}`);
+      return;
+    }
+    await githubFetch(`${base}/issues/${prNumber}/comments`, token, {
+      method: "POST",
+      body: JSON.stringify({ body: message }),
+    });
+    await githubFetch(`${base}/issues/${prNumber}`, token, {
+      method: "PATCH",
+      body: JSON.stringify({ state: "closed", state_reason: "not_planned" }),
+    });
+  };
+}
+
+/** Single-PR mode: react to the PR carried by a `pull_request_target` event. */
+async function runSinglePr(
+  token: string,
+  owner: string,
+  repo: string,
+  repository: string,
+): Promise<void> {
   const prNumber = Number(requireEnv("PR_NUMBER"));
   const authorAssociation = process.env.PR_AUTHOR_ASSOCIATION ?? "NONE";
   const isBot = (process.env.PR_AUTHOR_TYPE ?? "User") === "Bot";
 
-  const linkedIssues = await fetchLinkedIssues(token, owner!, repo!, prNumber);
+  const linkedIssues = await fetchLinkedIssues(token, owner, repo, prNumber);
   const result = evaluateGate({
     repository,
     authorAssociation,
@@ -237,20 +357,57 @@ async function main(): Promise<void> {
       `(author_association=${authorAssociation}, bot=${isBot}, linked_issues=${linkedIssues.length})`,
   );
 
-  if (result.pass) {
+  if (result.pass || !result.message) {
     return;
   }
 
   const base = `https://api.github.com/repos/${owner}/${repo}`;
-  await githubFetch(`${base}/issues/${prNumber}/comments`, token, {
-    method: "POST",
-    body: JSON.stringify({ body: result.message }),
-  });
-  await githubFetch(`${base}/issues/${prNumber}`, token, {
-    method: "PATCH",
-    body: JSON.stringify({ state: "closed", state_reason: "not_planned" }),
-  });
+  await makeCloser(token, base, false)(prNumber, result.message);
   console.log(`Closed PR #${prNumber} (reason=${result.reason}).`);
+}
+
+/** All-PRs mode: sweep every open PR, for on-demand `workflow_dispatch` runs. */
+async function runSweep(
+  token: string,
+  owner: string,
+  repo: string,
+  repository: string,
+  dryRun: boolean,
+): Promise<void> {
+  const base = `https://api.github.com/repos/${owner}/${repo}`;
+  const io: GateIo = {
+    listOpenPrs: () => fetchOpenPullRequests(token, owner, repo),
+    fetchLinkedIssues: (prNumber) =>
+      fetchLinkedIssues(token, owner, repo, prNumber),
+    closePr: makeCloser(token, base, dryRun),
+  };
+
+  const entries = await evaluateAllOpenPrs(io, repository);
+  const failing = entries.filter((entry) => !entry.result.pass);
+  console.log(
+    `Contribution gate sweep: ${entries.length} open PR(s) evaluated, ` +
+      `${failing.length} ${dryRun ? "would be " : ""}closed.`,
+  );
+  for (const entry of entries) {
+    console.log(
+      `  PR #${entry.number}: pass=${entry.result.pass} reason=${entry.result.reason}`,
+    );
+  }
+}
+
+async function main(): Promise<void> {
+  const token = requireEnv("GITHUB_TOKEN");
+  const repository = requireEnv("GITHUB_REPOSITORY");
+  const [owner, repo] = repository.split("/");
+
+  const allMode =
+    process.env.GATE_MODE === "all" || process.argv.includes("--all");
+  if (allMode) {
+    const dryRun = /^(1|true)$/i.test(process.env.DRY_RUN ?? "");
+    await runSweep(token, owner!, repo!, repository, dryRun);
+  } else {
+    await runSinglePr(token, owner!, repo!, repository);
+  }
 }
 
 if (import.meta.main) {
