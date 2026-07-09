@@ -64,6 +64,7 @@ import {
 import {
   findClusterDdlStatements,
   findDefaultPrivilegeStatements,
+  findMatchingStatements,
   findSessionSettingStatements,
   loadSqlFiles,
   ShadowLoadError,
@@ -99,6 +100,7 @@ import { parseFlags, UsageError } from "../flags.ts";
 import {
   effectiveProfileId,
   PROFILE_IDS,
+  reconcileBaselineDigest,
   resolveCliProfile,
 } from "../profile.ts";
 import type { RenameMode } from "../../plan/renames.ts";
@@ -149,6 +151,7 @@ export function writeExportFiles(
     redactSecrets: boolean;
     profile?: string;
     scope?: "database" | "cluster";
+    baselineDigest?: string;
   },
 ): string[] {
   mkdirSync(outRoot, { recursive: true });
@@ -185,6 +188,7 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       "flat-schemas": { type: "value" },
       "no-group-partitions": { type: "boolean" },
       "format-options": { type: "value" },
+      "no-format": { type: "boolean" },
       scope: { type: "value" },
     });
   } catch (err) {
@@ -192,7 +196,8 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       process.stderr.write(
         `${err.message}\nUsage: pgdelta schema export --source <pg-url> --out-dir <dir> ` +
           `[--layout by-object|ordered|grouped] [--profile ${PROFILE_IDS}] [--strict-coverage] [--unsafe-show-secrets] [--scope database|cluster]\n` +
-          `  [--format-options '{"keywordCase":"upper","maxWidth":180}']  (pretty-print SQL; any layout)\n` +
+          `  [--format-options '{"keywordCase":"upper","maxWidth":180}'] [--no-format]\n` +
+          `    (SQL is pretty-printed by default: lowercase keywords, width 180; any layout)\n` +
           `  Grouped-layout options (only with --layout grouped):\n` +
           `    [--grouping-mode single-file|subdirectory] [--group-patterns <json>] [--flat-schemas <csv>] [--no-group-partitions]\n`,
       );
@@ -282,10 +287,22 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
     };
   }
 
-  // SQL formatting is opt-in and layout-agnostic. Parse it up front so a
-  // malformed value fails before connecting to the database.
-  let format: SqlFormatOptions | undefined;
+  // SQL formatting is ON by default — the export is a human-facing artifact, so
+  // it pretty-prints with lowercase keywords and a 180-char width (formatter
+  // defaults otherwise: aligned columns). --format-options overrides every
+  // knob; --no-format restores the raw renderer output. Layout-agnostic, and
+  // purely cosmetic by contract: the fidelity gate (load(export) ≡ fb) covers
+  // the formatter. Parsed up front so a malformed value fails before connecting.
+  let format: SqlFormatOptions | undefined = flags["no-format"]
+    ? undefined
+    : { keywordCase: "lower", maxWidth: 180 };
   if (flags["format-options"] !== undefined) {
+    if (flags["no-format"]) {
+      process.stderr.write(
+        "--format-options and --no-format are mutually exclusive\n",
+      );
+      process.exit(2);
+    }
     try {
       const raw = JSON.parse(flags["format-options"]) as unknown;
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -302,11 +319,15 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
 
   const src = makePool(sourceUrl);
   try {
+    const redactSecrets = !flags["unsafe-show-secrets"];
     // resolve the profile against the source pool so export sees the SAME
     // handler-aware managed view as the profile-aware DB-to-DB path (review P1).
-    const ctx = await resolveCliProfile(src.pool, flags["profile"]);
+    // redactSecrets is passed so a profile-declared baseline captured in the
+    // other mode is rejected rather than silently not subtracting.
+    const ctx = await resolveCliProfile(src.pool, flags["profile"], {
+      redactSecrets,
+    });
     process.stderr.write("Extracting...\n");
-    const redactSecrets = !flags["unsafe-show-secrets"];
     const { factBase, diagnostics } = await ctx.extract(src.pool, {
       redactSecrets,
     });
@@ -339,11 +360,17 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
     // edges) from the exported view, so no `cluster/roles.sql` is written and the
     // directory reloads on any cluster. The projected-out roles become ambient,
     // so a `GRANT … TO <role>` the export still emits must be assumed present, or
-    // the from-pristine export plan would fail its requirement guard.
+    // the from-pristine export plan would fail its requirement guard. Enumerate
+    // the assumed roles from the PRE-baseline extraction (`factBase`), not the
+    // subtracted `view`: a role subtracted as baseline-identical (a platform role)
+    // still exists at apply time and is still referenced by a surviving object's
+    // owner/REVOKE, so it must stay assumed — otherwise a profile-declared
+    // baseline breaks the export's requirement guard (same pre-subtraction rule as
+    // the assumed-schema seed).
     const scopedView = projectManagementScope(view, exportScope);
     const scopeAssumedRoles =
       exportScope === "database"
-        ? view
+        ? factBase
             .facts()
             .filter((f) => f.id.kind === "role")
             .map((f) => (f.id as { name: string }).name)
@@ -379,6 +406,12 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       redactSecrets,
       scope: exportScope,
       ...(exportProfileId !== undefined ? { profile: exportProfileId } : {}),
+      // stamp the baseline digest so `schema apply` fails loud if the profile it
+      // resolves subtracts a different (or no) baseline — otherwise the platform
+      // objects this export omitted would read as source-only drops.
+      ...(ctx.baseline !== undefined
+        ? { baselineDigest: ctx.baseline.digest }
+        : {}),
     });
     if (removed.length > 0) {
       process.stderr.write(
@@ -662,14 +695,6 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   const shadow = makePool(shadowUrl);
   const tgt = makePool(targetUrl);
   try {
-    // resolve the profile against the TARGET pool (the apply target): this
-    // composes handler-aware extraction, policy, baseline, and — with
-    // --restrict-to-applier — the applier capability, exactly as the DB-to-DB
-    // `plan` command does, so SQL-file apply == DB-to-DB plan (review P1).
-    const ctx = await resolveCliProfile(tgt.pool, profileId, {
-      restrictToApplier: flags["restrict-to-applier"],
-    });
-
     // Secret redaction applies to BOTH sides so the diff stays consistent. With
     // --unsafe-show-secrets the declarative SQL's real FDW/server credentials and
     // subscription conninfo flow through the shadow extract unredacted and apply
@@ -682,9 +707,62 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     // manifest, so a `--unsafe-show-secrets` export re-loads its real credentials
     // without the operator re-passing the flag (and a redacted export is not
     // silently applied unredacted). The flag remains the fallback for directories
-    // without a manifest (older exports / hand-authored dirs).
+    // without a manifest (older exports / hand-authored dirs). Computed BEFORE
+    // profile resolution so a profile-declared baseline captured in the other
+    // mode is rejected.
     const redactSecrets =
       manifest?.redactSecrets ?? !flags["unsafe-show-secrets"];
+
+    // resolve the profile against the TARGET pool (the apply target): this
+    // composes handler-aware extraction, policy, baseline, and — with
+    // --restrict-to-applier — the applier capability, exactly as the DB-to-DB
+    // `plan` command does, so SQL-file apply == DB-to-DB plan (review P1).
+    const ctx = await resolveCliProfile(tgt.pool, profileId, {
+      restrictToApplier: flags["restrict-to-applier"],
+      redactSecrets,
+    });
+
+    // Reconcile the baseline this profile resolves against the digest the export
+    // recorded: a directory whose platform objects were omitted by a baseline
+    // must not be applied under a profile that subtracts a DIFFERENT (or no)
+    // baseline, or those platform objects read as source-only drops (Codex #323
+    // findings 1+2). No manifest (hand-authored dir) → nothing to reconcile.
+    if (manifest !== undefined) {
+      reconcileBaselineDigest(
+        manifest.baselineDigest,
+        ctx.baseline?.digest,
+        "export manifest",
+      );
+    }
+
+    // Extension shadow precheck: some extensions (pg_cron) can only run their
+    // DDL/intent in a specific database, so a declarative dir containing such
+    // statements could never load into an arbitrary shadow. Fail EARLY with a
+    // clear remediation instead of a mid-load "function does not exist" stuck
+    // error. Handlers without a precheck (pg_partman, pgmq) skip this.
+    for (const handler of ctx.handlers) {
+      const precheck = handler.shadowPrecheck;
+      if (precheck === undefined) continue;
+      const matched = files.filter(
+        (f) =>
+          findMatchingStatements(f.sql, (s) => precheck.matchesStatement(s))
+            .length > 0,
+      );
+      if (matched.length === 0) continue;
+      const verdict = await precheck.capable((sql) =>
+        shadow.pool.query(sql).then((r) => r.rows),
+      );
+      if (!verdict.capable) {
+        throw new UsageError(
+          `${matched.length} file(s) contain ${handler.extension} statements ` +
+            `(${matched.map((f) => f.name).join(", ")}) but the shadow database cannot ` +
+            `execute them: ${verdict.reason}. ` +
+            `Apply from a cluster whose shadow IS the ${handler.extension} database ` +
+            `(pass --shadow pointing at it), or exclude ${handler.extension} intent from the ` +
+            `managed view (a profile baseline / policy filter).`,
+        );
+      }
+    }
 
     // Extract the target FIRST (Phase 2b): the co-located seed is derived from
     // it, and the SAME result is reused as the diff source below — no second
@@ -812,15 +890,23 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         //    phase (after creates), but PostgreSQL applies a schema's default
         //    privileges only to objects created AFTER it in authored order;
         //    reordering it past a CREATE drops those implicit ACLs (review P2).
+        //    HAND-AUTHORED dirs only: an EXPORTED dir (manifest present) never
+        //    relies on implicit ADP grants — the exporter emits explicit
+        //    per-object REVOKE/GRANT for every object (enforced invariant,
+        //    pinned across objtypes by tests/export-fidelity.test.ts), so ADP
+        //    position is semantics-free there and the assist stays available.
         const parseErrors = analyzed.diagnostics.filter(
           (d) => d.code === "PARSE_ERROR" || d.code === "DISCOVERY_ERROR",
         );
         const sessionSettingFiles = files.filter(
           (f) => findSessionSettingStatements(f.sql).length > 0,
         );
-        const defaultPrivFiles = files.filter(
-          (f) => findDefaultPrivilegeStatements(f.sql).length > 0,
-        );
+        const defaultPrivFiles =
+          manifest === undefined
+            ? files.filter(
+                (f) => findDefaultPrivilegeStatements(f.sql).length > 0,
+              )
+            : [];
 
         if (
           parseErrors.length > 0 ||

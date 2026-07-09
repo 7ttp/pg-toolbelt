@@ -5,6 +5,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildFactBase } from "../core/fact.ts";
+import { serializeSnapshot } from "../core/snapshot.ts";
 import { rawProfile } from "../integrations/profile.ts";
 import { supabaseProfile } from "../integrations/supabase.ts";
 import { UsageError } from "./flags.ts";
@@ -13,12 +15,20 @@ import {
   isProfilePath,
   parseProfileFile,
   profileById,
+  reconcileBaselineDigest,
 } from "./profile.ts";
 
 function writeTempProfile(contents: string): string {
   const dir = mkdtempSync(join(tmpdir(), "pgdelta-profile-"));
   const path = join(dir, "profile.json");
   writeFileSync(path, contents, "utf8");
+  return path;
+}
+
+function writeTempSnapshot(fb: ReturnType<typeof buildFactBase>): string {
+  const dir = mkdtempSync(join(tmpdir(), "pgdelta-baseline-"));
+  const path = join(dir, "snapshot.json");
+  writeFileSync(path, serializeSnapshot(fb, { pgVersion: "170000" }), "utf8");
   return path;
 }
 
@@ -145,5 +155,89 @@ describe("profileById with a file path", () => {
     const profile = profileById(path);
     expect(profile.id).toBe("platform-middleware");
     expect(profile.handlers.map((h) => h.extension)).toEqual(["pg_cron"]);
+  });
+});
+
+describe("parseProfileFile: baseline field", () => {
+  test("resolves a relative baseline path against the profile file's directory", () => {
+    const profile = parseProfileFile(
+      JSON.stringify({
+        id: "mw",
+        handlers: [],
+        baseline: "./middleware-base.json",
+      }),
+      "/proj/db/pgdelta-profile.json",
+      { dir: "/proj/db" },
+    );
+    expect(profile.baselinePath).toBe("/proj/db/middleware-base.json");
+  });
+
+  test("keeps an absolute baseline path as-is; omits when absent", () => {
+    expect(
+      parseProfileFile(
+        JSON.stringify({ id: "a", handlers: [], baseline: "/abs/base.json" }),
+        "p.json",
+        { dir: "/proj" },
+      ).baselinePath,
+    ).toBe("/abs/base.json");
+    expect(
+      parseProfileFile(JSON.stringify({ id: "b", handlers: [] }), "p.json")
+        .baselinePath,
+    ).toBeUndefined();
+  });
+
+  test("rejects a non-string / empty baseline", () => {
+    expect(() =>
+      parseProfileFile(
+        JSON.stringify({ id: "a", handlers: [], baseline: 5 }),
+        "p.json",
+      ),
+    ).toThrow(/"baseline" must be a non-empty string/);
+    expect(() =>
+      parseProfileFile(
+        JSON.stringify({ id: "a", handlers: [], baseline: "" }),
+        "p.json",
+      ),
+    ).toThrow(/"baseline" must be a non-empty string/);
+  });
+
+  test("a profile .json with a relative baseline loads with an absolute baselinePath", () => {
+    const fb = buildFactBase(
+      [{ id: { kind: "schema", name: "platform" }, payload: {} }],
+      [],
+    );
+    const snapPath = writeTempSnapshot(fb);
+    const dir = mkdtempSync(join(tmpdir(), "pgdelta-profile-baseline-"));
+    const profilePath = join(dir, "profile.json");
+    // reference the snapshot by a path relative to the profile file's dir
+    writeFileSync(
+      profilePath,
+      JSON.stringify({ id: "mw", handlers: [], baseline: snapPath }),
+      "utf8",
+    );
+    expect(profileById(profilePath).baselinePath).toBe(snapPath);
+  });
+});
+
+describe("reconcileBaselineDigest", () => {
+  test("passes when the digests match (or both absent)", () => {
+    expect(() =>
+      reconcileBaselineDigest("abc", "abc", "plan artifact"),
+    ).not.toThrow();
+    expect(() =>
+      reconcileBaselineDigest(undefined, undefined, "plan artifact"),
+    ).not.toThrow();
+  });
+
+  test("throws on every asymmetry (mismatch / stamped-only / resolved-only)", () => {
+    expect(() =>
+      reconcileBaselineDigest("aaaa", "bbbb", "plan artifact"),
+    ).toThrow(UsageError);
+    expect(() =>
+      reconcileBaselineDigest("aaaa", undefined, "export manifest"),
+    ).toThrow(/declares NO baseline/);
+    expect(() =>
+      reconcileBaselineDigest(undefined, "bbbb", "export manifest"),
+    ).toThrow(/was produced with NONE/);
   });
 });

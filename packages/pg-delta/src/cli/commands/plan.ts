@@ -100,15 +100,19 @@ export async function cmdPlan(args: string[]): Promise<void> {
   const src = makePool(sourceUrl);
   const dst = makePool(desiredUrl);
   try {
+    // redaction mode is passed into profile resolution so a profile-declared
+    // baseline captured in the OTHER mode is rejected (its secret-bearing facts
+    // would hash differently and silently stop subtracting).
+    const redactSecrets = !flags["unsafe-show-secrets"];
     // Resolve the profile against the SOURCE pool (the source is the apply
     // target): this composes handler-aware extraction, the profile's policy +
     // baseline, and — with --restrict-to-applier — the applier capability. All
     // three flow into planOptions so plan == prove == apply (P0/P2).
     const ctx = await resolveCliProfile(src.pool, flags["profile"], {
       restrictToApplier: flags["restrict-to-applier"],
+      redactSecrets,
     });
 
-    const redactSecrets = !flags["unsafe-show-secrets"];
     process.stderr.write("Extracting source...\n");
     process.stderr.write("Extracting desired...\n");
     const [sourceResult, desiredResult] = await Promise.all([

@@ -290,9 +290,244 @@ function seg(name: string): string {
   );
 }
 
-function pathFor(id: StableId): string {
+/** Precomputed routing context threaded through {@link pathFor}: the cyclic-FK
+ *  split set, the extension-member map, the index→relation parent map, the
+ *  relation-kind map, and the concurrent-index exception set. Built once per
+ *  export. */
+interface PathContext {
+  /** Encoded ids of cycle-participating FK constraints (→ `.fk.sql`). */
+  readonly cyclicFks: ReadonlySet<string>;
+  /** Encoded extension-member object id → owning extension name. Satellites
+   *  (acl/comment) targeting a member route to the extension's own file. */
+  readonly memberExt: ReadonlyMap<string, string>;
+  /** Encoded index id → its owning relation's file dir + name (from the index
+   *  fact's parent link): indexes CO-LOCATE with their table / matview file. */
+  readonly indexParent: ReadonlyMap<string, { dir: string; name: string }>;
+  /** `schema\u0000name` → file dir for the relation ("views" /
+   *  "materialized_views"); absent = "tables". Routes a TABLE_SCOPED satellite
+   *  (an INSTEAD OF trigger on a view, a rule) to its actual relation's file. */
+  readonly relationDir: ReadonlyMap<string, string>;
+  /** Encoded ids of indexes whose rendered SQL is CREATE INDEX CONCURRENTLY —
+   *  non-transactional statements must stay ALONE in their file (loader
+   *  contract), so these keep their own `indexes/<name>.sql` path. */
+  readonly concurrentIndexes: ReadonlySet<string>;
+}
+
+/** Encoded member object id → owning extension name, from the
+ *  `memberOfExtension` edges extraction records. */
+function extensionMembersByEncoded(fb: FactBase): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const edge of fb.edges) {
+    if (edge.kind !== "memberOfExtension") continue;
+    if (edge.to.kind !== "extension") continue;
+    map.set(encodeId(edge.from), (edge.to as { name: string }).name);
+  }
+  return map;
+}
+
+/** Encoded index id → owning relation (dir + name), from the index facts'
+ *  parent links (extraction records the table / materialized view as the
+ *  index's parent). */
+function indexParentsByEncoded(
+  fb: FactBase,
+): Map<string, { dir: string; name: string }> {
+  const map = new Map<string, { dir: string; name: string }>();
+  for (const fact of fb.facts()) {
+    if (fact.id.kind !== "index" || fact.parent === undefined) continue;
+    const parent = fact.parent as { kind: string; name?: string };
+    if (typeof parent.name !== "string") continue;
+    map.set(encodeId(fact.id), {
+      dir: parent.kind === "materializedView" ? "materialized_views" : "tables",
+      name: parent.name,
+    });
+  }
+  return map;
+}
+
+/** `schema\u0000name` → file dir for VIEW / MATERIALIZED VIEW relations, so a
+ *  TABLE_SCOPED satellite naming that relation routes to the right file. */
+function relationDirsByName(fb: FactBase): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const fact of fb.facts()) {
+    if (fact.id.kind !== "view" && fact.id.kind !== "materializedView") {
+      continue;
+    }
+    const id = fact.id as { schema: string; name: string };
+    map.set(
+      nameKey(id.schema, id.name),
+      fact.id.kind === "view" ? "views" : "materialized_views",
+    );
+  }
+  return map;
+}
+
+/** Explanatory header prepended to every split `.fk.sql` file. */
+const FK_SPLIT_HEADER =
+  "-- Foreign keys in a cross-table reference cycle are split out of their\n" +
+  "-- table's file: each file loads atomically, so keeping them inline would\n" +
+  "-- deadlock the loader (every file would need a table another pending file\n" +
+  "-- creates). These statements apply once all referenced tables exist.\n\n";
+
+/** Join a schema-qualified relation name into an opaque map key. NUL
+ *  (backslash-u0000) cannot appear in an identifier, so keys are
+ *  collision-free (a space separator could collide: "a b"+"c" vs
+ *  "a"+"b c"). EVERY producer and consumer of these keys goes through
+ *  this helper. */
+function nameKey(schema: string, name: string): string {
+  return `${schema}\u0000${name}`;
+}
+
+/** The owning table of a table-scoped (or table) id, as an opaque key. */
+function owningTableKey(id: StableId): string | undefined {
+  if (id.kind === "table") {
+    const t = id as { schema: string; name: string };
+    return nameKey(t.schema, t.name);
+  }
+  if (TABLE_SCOPED.has(id.kind)) {
+    const t = id as unknown as { schema: string; table: string };
+    return nameKey(t.schema, t.table);
+  }
+  return undefined;
+}
+
+/**
+ * Encoded ids of FOREIGN KEY constraints that participate in a cross-table
+ * reference CYCLE (mutual FKs, or a longer loop). ONLY these move to a sibling
+ * `<table>.fk.sql`: export files apply atomically, so a reference cycle across
+ * table files can never load (each file needs a table another un-committed file
+ * creates), while every ACYCLIC FK resolves through the loader's bounded retry
+ * and stays inline in its table's file for readability.
+ *
+ * Reference edges come from extraction's pg_depend edges (an FK constraint
+ * `depends` on the referenced table's columns / unique constraint), so no SQL
+ * is parsed here. Cycle test: Tarjan SCC over the table-reference graph — an FK
+ * is cyclic iff its owning table and a referenced table share a component.
+ */
+function cyclicForeignKeys(fb: FactBase): Set<string> {
+  interface Fk {
+    encoded: string;
+    owner: string;
+    refs: Set<string>;
+  }
+  const fks = new Map<string, Fk>();
+  for (const fact of fb.facts()) {
+    if (fact.id.kind !== "constraint") continue;
+    if ((fact.payload as { type?: unknown }).type !== "f") continue;
+    const owner = owningTableKey(fact.id);
+    if (owner === undefined) continue;
+    const encoded = encodeId(fact.id);
+    fks.set(encoded, { encoded, owner, refs: new Set() });
+  }
+  if (fks.size === 0) return new Set();
+
+  // table-reference graph: owner → referenced table, per FK edge
+  const adjacency = new Map<string, Set<string>>();
+  for (const edge of fb.edges) {
+    const fk = fks.get(encodeId(edge.from));
+    if (fk === undefined) continue;
+    const ref = owningTableKey(edge.to);
+    if (ref === undefined || ref === fk.owner) continue;
+    fk.refs.add(ref);
+    let targets = adjacency.get(fk.owner);
+    if (targets === undefined) {
+      targets = new Set();
+      adjacency.set(fk.owner, targets);
+    }
+    targets.add(ref);
+  }
+
+  // Tarjan SCC (iterative — no recursion-depth ceiling on large schemas)
+  const sccOf = new Map<string, number>();
+  {
+    const index = new Map<string, number>();
+    const low = new Map<string, number>();
+    const onStack = new Set<string>();
+    const stack: string[] = [];
+    let counter = 0;
+    let sccCount = 0;
+    const nodes = new Set<string>(adjacency.keys());
+    for (const targets of adjacency.values()) {
+      for (const t of targets) nodes.add(t);
+    }
+    interface Frame {
+      node: string;
+      neighbors: string[];
+      i: number;
+    }
+    const visit = (frames: Frame[], node: string): void => {
+      index.set(node, counter);
+      low.set(node, counter);
+      counter++;
+      stack.push(node);
+      onStack.add(node);
+      frames.push({ node, neighbors: [...(adjacency.get(node) ?? [])], i: 0 });
+    };
+    for (const root of nodes) {
+      if (index.has(root)) continue;
+      const frames: Frame[] = [];
+      visit(frames, root);
+      while (frames.length > 0) {
+        const frame = frames[frames.length - 1]!;
+        if (frame.i < frame.neighbors.length) {
+          const next = frame.neighbors[frame.i++]!;
+          if (!index.has(next)) {
+            visit(frames, next);
+          } else if (onStack.has(next)) {
+            low.set(
+              frame.node,
+              Math.min(low.get(frame.node)!, index.get(next)!),
+            );
+          }
+        } else {
+          frames.pop();
+          const parent = frames[frames.length - 1];
+          if (parent !== undefined) {
+            low.set(
+              parent.node,
+              Math.min(low.get(parent.node)!, low.get(frame.node)!),
+            );
+          }
+          if (low.get(frame.node) === index.get(frame.node)) {
+            let member: string;
+            do {
+              member = stack.pop()!;
+              onStack.delete(member);
+              sccOf.set(member, sccCount);
+            } while (member !== frame.node);
+            sccCount++;
+          }
+        }
+      }
+    }
+  }
+
+  const cyclic = new Set<string>();
+  for (const fk of fks.values()) {
+    const ownerScc = sccOf.get(fk.owner);
+    if (ownerScc === undefined) continue;
+    for (const ref of fk.refs) {
+      if (sccOf.get(ref) === ownerScc) {
+        cyclic.add(fk.encoded);
+        break;
+      }
+    }
+  }
+  return cyclic;
+}
+
+function pathFor(id: StableId, ctx: PathContext): string {
   const target = fileTarget(id);
   const kind = target.kind;
+  // A satellite (acl/comment, unwrapped by fileTarget) whose target is an
+  // EXTENSION MEMBER files into the owning extension's file, next to its
+  // CREATE EXTENSION. Member objects themselves never yield actions
+  // (reference-only), so only satellites reach this branch. Keeps a real DB
+  // with e.g. pgTAP from sprouting hundreds of REVOKE-only function files —
+  // the state stays fully managed, only its file placement changes.
+  const memberExtension = ctx.memberExt.get(encodeId(target));
+  if (memberExtension !== undefined) {
+    return `cluster/extensions/${seg(memberExtension)}.sql`;
+  }
   // A schema-scoped ALTER DEFAULT PRIVILEGES depends on its schema, so it must
   // NOT share the atomic cluster/roles.sql file with CREATE ROLE: with reorder
   // disabled (any ADP present) the raw loader would roll the role back when the
@@ -315,12 +550,46 @@ function pathFor(id: StableId): string {
   }
   if (TABLE_SCOPED.has(kind)) {
     const t = target as { schema: string; table: string };
-    return `schemas/${seg(t.schema)}/tables/${seg(t.table)}.sql`;
+    // A foreign key participating in a cross-table reference CYCLE cannot stay
+    // in its table's file: the loader applies each file atomically, so two
+    // mutually-referencing tables would each need a table the other
+    // un-committed file creates, and neither could ever commit. Those FKs —
+    // and their comment/acl satellites, already unwrapped by `fileTarget` —
+    // move to a sibling `<table>.fk.sql` loaded once all referenced tables
+    // exist (pg_dump's post-data precedent). ACYCLIC FKs (the common case)
+    // stay INLINE for readability — the loader's bounded retry orders their
+    // files. `cyclicFks` is precomputed by {@link cyclicForeignKeys}.
+    if (target.kind === "constraint" && ctx.cyclicFks.has(encodeId(target))) {
+      return `schemas/${seg(t.schema)}/tables/${seg(t.table)}.fk.sql`;
+    }
+    // The `table` field of a TABLE_SCOPED id names a RELATION, not necessarily
+    // a table: an INSTEAD OF trigger / rule / comment can target a view or a
+    // materialized view — file those with their actual relation.
+    const relationDir =
+      ctx.relationDir.get(nameKey(t.schema, t.table)) ?? "tables";
+    if (kind === "trigger")
+      console.error(
+        "DBG trigger",
+        JSON.stringify({
+          key: `${t.schema} ${t.table}`,
+          hit: ctx.relationDir.get(nameKey(t.schema, t.table)),
+          mapSize: ctx.relationDir.size,
+          keys: [...ctx.relationDir.keys()],
+        }),
+      );
+    return `schemas/${seg(t.schema)}/${relationDir}/${seg(t.table)}.sql`;
   }
   if (kind === "index") {
-    // indexes name only (schema, name) — file them with the schema; their
-    // CREATE INDEX statement names the table itself
     const t = target as { schema: string; name: string };
+    // Indexes CO-LOCATE with their owning relation's file (old-engine
+    // behavior, restored for readability) — the owning table / matview comes
+    // from the index fact's parent link. EXCEPT a CREATE INDEX CONCURRENTLY
+    // (only rendered under the opt-in `concurrentIndexes` param): it is
+    // non-transactional and must stay ALONE in its file (loader contract).
+    const parent = ctx.indexParent.get(encodeId(target));
+    if (parent !== undefined && !ctx.concurrentIndexes.has(encodeId(target))) {
+      return `schemas/${seg(t.schema)}/${parent.dir}/${seg(parent.name)}.sql`;
+    }
     return `schemas/${seg(t.schema)}/indexes/${seg(t.name)}.sql`;
   }
   const dir = SCHEMA_DIRS[kind];
@@ -373,11 +642,18 @@ export function exportSqlFiles(
     return fb.referenceOnly.has(key) && !members.has(key);
   });
   const baseline = buildFactBase(pristine, []);
+  // FKs inside a cross-table reference cycle stay as ALTERs (routed to a
+  // sibling `.fk.sql`); everything else folds inline. Computed BEFORE the plan
+  // so the fold pass can exclude them.
+  const cyclicFks = cyclicForeignKeys(fb);
   // `fb` is the already-resolved managed view, so we do NOT re-run policy
   // filtering / serialize rules here; we only forward the assumed schema/role
   // sets so the requirement guard exempts actions consuming assumed-but-filtered
-  // objects (review P1).
+  // objects (review P1). `foldConstraints` renders validated table constraints
+  // INLINE in their CREATE TABLE (export files are consumed by the retry /
+  // reorder loader, where that is safe — see PlanOptions.foldConstraints).
   const rendered = plan(baseline, fb, {
+    foldConstraints: { exclude: cyclicFks },
     ...(options.assumedSchemas !== undefined
       ? { assumedSchemas: options.assumedSchemas }
       : {}),
@@ -389,8 +665,28 @@ export function exportSqlFiles(
       : {}),
   });
 
+  // Routing context, computed once per export: the cyclic-FK split set (empty
+  // for ~all schemas), the extension-member map (satellites on members file
+  // with their extension), the index→relation parent map (co-location), the
+  // relation-kind map (satellites on views), and the concurrent-index
+  // exception set (must stay alone in their file).
+  const pathContext: PathContext = {
+    cyclicFks,
+    memberExt: extensionMembersByEncoded(fb),
+    indexParent: indexParentsByEncoded(fb),
+    relationDir: relationDirsByName(fb),
+    concurrentIndexes: new Set(
+      rendered.actions
+        .filter(
+          (a) =>
+            a.produces[0]?.kind === "index" && /\bCONCURRENTLY\b/i.test(a.sql),
+        )
+        .map((a) => encodeId(a.produces[0]!)),
+    ),
+  };
+
   if (layout === "grouped") {
-    return exportGrouped(rendered.actions, fb, options);
+    return exportGrouped(rendered.actions, fb, options, pathContext);
   }
 
   // group statements by file, preserving plan order within AND across
@@ -399,7 +695,10 @@ export function exportSqlFiles(
   const files = new Map<string, { firstAt: number; statements: string[] }>();
   rendered.actions.forEach((action, position) => {
     const subject = subjectOf(action);
-    const path = subject === undefined ? "cluster/misc.sql" : pathFor(subject);
+    const path =
+      subject === undefined
+        ? "cluster/misc.sql"
+        : pathFor(subject, pathContext);
     const entry = files.get(path) ?? { firstAt: position, statements: [] };
     entry.statements.push(action.sql);
     files.set(path, entry);
@@ -414,7 +713,9 @@ export function exportSqlFiles(
     rendered.actions.forEach((action) => {
       const subject = subjectOf(action);
       const path =
-        subject === undefined ? "cluster/misc.sql" : pathFor(subject);
+        subject === undefined
+          ? "cluster/misc.sql"
+          : pathFor(subject, pathContext);
       const last = runs[runs.length - 1];
       if (last !== undefined && last.path === path) {
         last.statements.push(action.sql);
@@ -433,7 +734,9 @@ export function exportSqlFiles(
   );
   return ordered.map(([path, entry]) => ({
     name: path,
-    sql: renderFileSql(entry.statements, options.format),
+    sql:
+      (path.endsWith(".fk.sql") ? FK_SPLIT_HEADER : "") +
+      renderFileSql(entry.statements, options.format),
   }));
 }
 
@@ -469,6 +772,7 @@ function exportGrouped(
   actions: Action[],
   fb: FactBase,
   options: ExportOptions,
+  pathContext: PathContext,
 ): SqlFile[] {
   const grouping = options.grouping ?? {};
   const mode = grouping.mode ?? "subdirectory";
@@ -479,13 +783,51 @@ function exportGrouped(
     options.onWarning,
   );
 
+  // Category that FOLLOWS the co-location routing: an index takes its owning
+  // relation's category (tables / matviews); a TABLE_SCOPED satellite on a
+  // view / matview takes that relation's category — so flat-schema collapse
+  // keeps co-located statements in the same per-category file as their
+  // relation instead of splitting them back out.
+  const categoryFor = (id: StableId): Category => {
+    const t = groupingTarget(id);
+    if (t.kind === "index") {
+      const encoded = encodeId(t);
+      const parent = pathContext.indexParent.get(encoded);
+      if (parent !== undefined && !pathContext.concurrentIndexes.has(encoded)) {
+        return parent.dir === "materialized_views" ? "matviews" : "tables";
+      }
+    }
+    if (TABLE_SCOPED.has(t.kind)) {
+      const s = t as unknown as { schema: string; table: string };
+      const dir = pathContext.relationDir.get(nameKey(s.schema, s.table));
+      if (dir === "views") return "views";
+      if (dir === "materialized_views") return "matviews";
+    }
+    return categoryOf(id);
+  };
+
   const groupedPath = (id: StableId): string => {
-    const base = pathFor(id);
+    const base = pathFor(id, pathContext);
+    // Cycle-participating FKs keep their sibling `<table>.fk.sql` path in EVERY
+    // grouping mode: the flat-schema / name-pattern regrouping below would
+    // otherwise fold them back into an atomic per-schema file, re-introducing
+    // the mutual-FK load deadlock the split exists to prevent (two flat schemas
+    // referencing each other). pathFor routes only cyclic FKs to `.fk.sql`, so
+    // the suffix uniquely identifies them.
+    if (base.endsWith(".fk.sql")) return base;
+    // Satellites routed to an extension's file stay there: their TARGET has a
+    // schema (e.g. a pgcrypto function in `public`), so the flat/pattern
+    // regrouping below would otherwise pull them back into `schemas/<s>/…`.
+    if (base.startsWith("cluster/extensions/")) return base;
+    // a CONCURRENTLY index (or one with no resolvable parent) keeps its own
+    // indexes/<name>.sql file — flat regrouping would fold the
+    // non-transactional statement into an atomic multi-statement file.
+    if (base.includes("/indexes/")) return base;
     const { schema, objectName } = schemaAndName(id);
     // cluster-level objects (no schema) are never regrouped
     if (schema === undefined) return base;
 
-    const category = categoryOf(id);
+    const category = categoryFor(id);
 
     // flat schema: collapse to one file per category (schema.sql stays put)
     if (flatSet.has(schema)) {
@@ -524,7 +866,7 @@ function exportGrouped(
     const subject = subjectOf(action);
     const path =
       subject === undefined ? "cluster/misc.sql" : groupedPath(subject);
-    const category = subject === undefined ? "misc" : categoryOf(subject);
+    const category = subject === undefined ? "misc" : categoryFor(subject);
     const entry = files.get(path) ?? { category, items: [] };
     entry.items.push({
       sql: action.sql,
@@ -550,6 +892,11 @@ function exportGrouped(
           a.verbRank - b.verbRank || a.scopeRank - b.scopeRank || a.at - b.at,
       )
       .map((item) => item.sql);
-    return { name: path, sql: renderFileSql(statements, options.format) };
+    return {
+      name: path,
+      sql:
+        (path.endsWith(".fk.sql") ? FK_SPLIT_HEADER : "") +
+        renderFileSql(statements, options.format),
+    };
   });
 }
