@@ -28,13 +28,21 @@ Highlights folded into this release (previously tracked as individual
 `pg-delta-next` changes):
 
 - **Declarative schema export/apply** with `by-object` / `ordered` / `grouped`
-  layouts, optional SQL pretty-printing, co-located shadow/seed, management
-  scope (`database` | `cluster`), and an optional `@supabase/pg-topo`-backed
-  statement-reordering assist plus a database-free `schema lint`.
+  layouts, co-located shadow/seed, management scope (`database` | `cluster`), and
+  an optional `@supabase/pg-topo`-backed statement-reordering assist plus a
+  database-free `schema lint`. **Export is a source-of-truth artifact**: SQL is
+  pretty-printed by default (`--no-format` opts out), validated constraints fold
+  inline into `CREATE TABLE`, indexes co-locate with their owning relation, and
+  mutually-referencing foreign keys round-trip — all under the
+  `load(export(db)) ≡ db` fidelity gate.
 - **Integration profiles** (`raw` | `supabase` | loadable custom profiles) with
-  extension intent handlers (e.g. `pg_cron`, `pg_partman`), assumed
-  schemas/roles for platform-managed ambient dependencies, and baseline
-  seeding.
+  extension intent handlers (e.g. `pg_cron`, `pg_partman`) and assumed
+  schemas/roles for platform-managed ambient dependencies. A profile can declare
+  its own **baseline** — a `snapshot` subtracted from both sides so platform
+  objects (base-image roles, extension-owned schemas) stay invisible with no
+  per-command flag; its digest is stamped on plan/export artifacts and reconciled
+  at apply/prove so `plan == prove == apply` holds (a swapped/edited/missing
+  baseline fails loud). `diff` / `drift` / `snapshot` gained `--profile` for parity.
 - **Privilege correctness**: ALTER DEFAULT PRIVILEGES routing/elision,
   owner-ACL and revoked-PUBLIC-default convergence, aggregate/FDW grant
   handling.
