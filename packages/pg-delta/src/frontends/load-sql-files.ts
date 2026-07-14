@@ -36,6 +36,7 @@ import {
   type ExtractResult,
 } from "../extract/extract.ts";
 import { notExtensionMember, USER_SCHEMA_FILTER } from "../extract/scope.ts";
+import { encodeId, type StableId } from "../core/stable-id.ts";
 import { splitSqlStatements } from "./sql-format/format-utils.ts";
 
 /** SQLSTATE 25001 ("active_sql_transaction") — raised when a statement that
@@ -471,6 +472,17 @@ export async function loadSqlFiles(
      *  "not empty". Only these schemas are exempt — an unexpected object
      *  anywhere else still fails the guard. */
     seededSchemas?: string[];
+    /** Encoded stable ids of the routines the Phase 2b seed ACTUALLY created,
+     *  mapped to each routine's seeded `pg_get_functiondef` text. Scopes the
+     *  post-load body-validation leniency: a routine is treated as
+     *  "seeded platform code" (warn on a wonky body) only when its overload-safe
+     *  encoded identity is in this map AND its current def is unchanged from the
+     *  seeded def. A user-authored routine in a seeded schema — a new overload,
+     *  or a CREATE OR REPLACE that changes the body — is NOT in (or no longer
+     *  matches) this map and THROWS (Codex #329). When OMITTED (direct library
+     *  callers), leniency falls back to the coarser `seededSchemas` name check
+     *  for backward compatibility; the CLI always passes this once it seeds. */
+    seededRoutines?: ReadonlyMap<string, string>;
   } = {},
 ): Promise<LoadResult> {
   // Rounds scale with dependency DEPTH, not file count: each round resolves
@@ -491,6 +503,7 @@ export async function loadSqlFiles(
   // populated before this load, and `<> ALL(ARRAY[]::text[])` is TRUE for every
   // row when nothing was seeded, so the default (unseeded) path is unchanged.
   const seededSchemas = options.seededSchemas ?? [];
+  const seededRoutines = options.seededRoutines;
   const preexisting = await shadow.query(
     `
     SELECT count(*)::int AS n FROM pg_class c
@@ -544,6 +557,9 @@ export async function loadSqlFiles(
   // bounded retry rounds at file granularity (fail-safe ordering)
   let pending = [...files].sort((a, b) => (a.name < b.name ? -1 : 1));
   let rounds = 0;
+  // body-validation warnings for SEEDED-schema routines (populated below,
+  // outside the try/finally so the final result can merge them in).
+  let seededBodyWarnings: Diagnostic[] = [];
   // the most recent round's per-file failures, retained so a budget-exhaustion
   // error can report WHY each still-pending file failed (review P1 #2).
   let lastFailures: Array<{ file: SqlFile; message: string }> = [];
@@ -707,26 +723,90 @@ export async function loadSqlFiles(
       }
     }
 
-    // body validation: re-run routine definitions with checks ON
+    // body validation: re-run routine definitions with checks ON.
+    // `check_function_bodies` only validates sql/plpgsql bodies — per the
+    // Postgres docs, it "has no effect on ... functions written in languages
+    // other than SQL and PL/pgSQL, whose bodies are not checked". Re-running a
+    // non-sql/plpgsql routine (internal/c, or any other procedural language)
+    // therefore adds no coverage, and can actively break the load: e.g.
+    // `CREATE TYPE ... AS RANGE (...)` auto-creates `LANGUAGE internal`
+    // constructor/support functions, and re-running those as
+    // `CREATE OR REPLACE FUNCTION ... LANGUAGE internal` fails with
+    // "permission denied for language internal" for a non-superuser role.
+    // `identity_args` reuses the EXACT `format_type(unnest(proargtypes))`
+    // expression extraction uses (src/extract/routines.ts) so the encoded
+    // `StableId` reconstructed per row matches the seed's `seededRoutines` keys
+    // byte-for-byte — the leniency gate is by overload-safe identity, not name.
     const defs = await client.query(`
-      SELECT pg_get_functiondef(p.oid) AS def
-      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      SELECT n.nspname AS nspname, p.proname AS proname, p.prokind AS prokind,
+             ARRAY(SELECT format_type(t.t, NULL)
+                   FROM unnest(p.proargtypes) WITH ORDINALITY AS t(t, ord)
+                   ORDER BY t.ord)::text[] AS identity_args,
+             pg_get_functiondef(p.oid) AS def
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN pg_language l ON l.oid = p.prolang
       WHERE p.prokind IN ('f', 'p')
+        AND l.lanname IN ('sql', 'plpgsql')
         AND n.nspname NOT IN ('pg_catalog', 'information_schema')
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend d
           WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')`);
     await client.query(`SET check_function_bodies = on`);
     const bodyErrors: Diagnostic[] = [];
-    for (const row of defs.rows as { def: string }[]) {
+    const bodyWarnings: Diagnostic[] = [];
+    for (const row of defs.rows as {
+      nspname: string;
+      proname: string;
+      prokind: string;
+      identity_args: string[];
+      def: string;
+    }[]) {
       try {
         await client.query(row.def);
       } catch (error) {
-        bodyErrors.push({
-          code: "invalid_routine_body",
-          severity: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+        const message = `${row.nspname}.${row.proname}: ${error instanceof Error ? error.message : String(error)}`;
+        // Seeded platform routines (Phase 2b assumed schemas) are reference-only
+        // on both sides of the diff — they cancel, so a wonky seeded body cannot
+        // corrupt the plan — and they are not the user's code to fail their
+        // apply on. Still surface it as a warning rather than swallowing it: a
+        // seeded-routine validation failure has previously exposed a real
+        // engine bug in platform-code reconstruction.
+        //
+        // Scope the leniency to routines the seed ACTUALLY created, by
+        // overload-safe identity AND unchanged body (Codex #329). A USER routine
+        // that merely lives in a seeded schema NAME — a new overload, or a
+        // CREATE OR REPLACE that changed the body — is the user's code: it must
+        // fail loudly, because assumed-schema facts are reference-only in the
+        // diff and it would otherwise be a silent no-op. When `seededRoutines`
+        // is omitted (direct library callers) fall back to the coarser
+        // schema-name check for backward compatibility.
+        const seedLenient =
+          seededRoutines === undefined
+            ? seededSchemas.includes(row.nspname)
+            : ((): boolean => {
+                const id: StableId = {
+                  kind: row.prokind === "p" ? "procedure" : "function",
+                  schema: row.nspname,
+                  name: row.proname,
+                  args: (row.identity_args as string[]).map(String),
+                };
+                const seededDef = seededRoutines.get(encodeId(id));
+                return seededDef !== undefined && seededDef === row.def;
+              })();
+        if (seedLenient) {
+          bodyWarnings.push({
+            code: "invalid_routine_body",
+            severity: "warning",
+            message,
+          });
+        } else {
+          bodyErrors.push({
+            code: "invalid_routine_body",
+            severity: "error",
+            message,
+          });
+        }
       }
     }
     if (bodyErrors.length > 0) {
@@ -735,6 +815,7 @@ export async function loadSqlFiles(
         bodyErrors,
       );
     }
+    seededBodyWarnings = bodyWarnings;
 
     // DML rejection by observation: any MANAGED USER table with rows fails.
     // "User table" must mean the SAME thing the diff path manages, so reuse the
@@ -782,7 +863,7 @@ export async function loadSqlFiles(
   return {
     factBase: result.factBase,
     pgVersion: result.pgVersion,
-    diagnostics: result.diagnostics,
+    diagnostics: [...result.diagnostics, ...seededBodyWarnings],
     rounds,
   };
 }

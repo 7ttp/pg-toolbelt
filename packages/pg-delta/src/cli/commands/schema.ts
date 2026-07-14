@@ -799,6 +799,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     // plan. An explicit --shadow keeps bring-your-own-bootstrap; the `raw`
     // profile has no assumedSchemas so `deriveAssumedSchemaSeed` returns nothing.
     let seededSchemas: string[] = [];
+    let seededRoutines = new Map<string, string>();
     let seedMs = 0;
     if (coLocated !== undefined) {
       const flatProfile = ctx.planOptions.policy
@@ -821,6 +822,11 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
             ...(flatProfile?.assumedRoles ?? []),
             ...assumedTargetRoles,
           ],
+          // SUSET (superuser-context) GUCs to strip from the seed: probed by
+          // resolveProfile (src/integrations/profile.ts), gated on the target
+          // connection's role actually being a non-superuser — see
+          // `ResolvedProfile.susetGucs`'s doc comment for why.
+          ...(ctx.susetGucs !== undefined ? { susetGucs: ctx.susetGucs } : {}),
         });
         if (seed.sql !== "") {
           process.stderr.write(
@@ -839,6 +845,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
           }
           seedMs = Date.now() - tSeed0;
           seededSchemas = seed.schemas;
+          seededRoutines = seed.seededRoutines;
           process.stderr.write(`  Seeded in ${seedMs}ms\n`);
         }
       }
@@ -977,8 +984,13 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       loadResult = await loadSqlFiles(loadInput, shadow.pool, {
         extract: (p, o) => ctx.extract(p, { ...o, redactSecrets }),
         // Phase 2b: exempt the pre-seeded assumed schemas from the shadow-
-        // emptiness guard (they were deliberately populated above).
-        ...(seededSchemas.length > 0 ? { seededSchemas } : {}),
+        // emptiness guard (they were deliberately populated above), and pass the
+        // seeded-routine identity map so body-validation leniency is scoped to
+        // routines the seed actually created — a user routine merely living in a
+        // seeded schema NAME must still fail loudly (Codex #329). Always pass the
+        // map (even empty) once we seeded, so the identity gating fully replaces
+        // the schema-name gating for the CLI path.
+        ...(seededSchemas.length > 0 ? { seededSchemas, seededRoutines } : {}),
         // A declarative dir that carries cluster-level role state (CREATE ROLE,
         // membership grants — e.g. `cluster/roles.sql`) trips the default
         // `databaseScratch` leak guard. `--isolated-shadow` asserts the shadow is
@@ -1025,11 +1037,17 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     });
 
     // targetResult + assumedTargetRoles were computed before the seed (above).
-    const sourceFb = projectManagementScope(targetResult.factBase, scope);
-    const desiredFb = projectManagementScope(loadResult.factBase, scope);
+    // Pass the RAW fact bases and the scope: plan() resolves the policy managed
+    // view FIRST and projects the scope out SECOND (change-set.ts), the same
+    // proven-correct order `schema export` uses. Projecting scope here (before
+    // plan's resolveView) would strip the owner edges a policy owner-exclusion
+    // rule reads and wrongly plan a DROP of a system-owned platform object.
+    const sourceFb = targetResult.factBase;
+    const desiredFb = loadResult.factBase;
 
     const planOptions = {
       renames,
+      scope,
       ...(acceptRenames.length > 0 ? { acceptRenames } : {}),
       ...ctx.planOptions, // policy, capability, baseline (from the profile)
       ...(assumedTargetRoles.length > 0
@@ -1085,15 +1103,14 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     const report = await apply(thePlan, tgt.pool, {
       ...ctx.applyOptions, // baseline + handler-aware re-extract (from the profile)
       // the fingerprint gate re-extracts the target and compares to the plan
-      // source; that source used `redactSecrets` AND the scope projection, so the
-      // re-extract must apply both — otherwise --unsafe-show-secrets trips the
-      // gate against unredacted credentials, or database scope trips it against
-      // the target's ambient roles (review P2 / §scope).
-      reextract: (p) =>
-        ctx.extract(p, { redactSecrets }).then((r) => ({
-          ...r,
-          factBase: projectManagementScope(r.factBase, scope),
-        })),
+      // source; that source used `redactSecrets`, so the re-extract must too —
+      // otherwise --unsafe-show-secrets trips the gate against unredacted
+      // credentials. The scope projection is NOT applied here: apply() runs it
+      // AFTER resolveView (reading the plan's stamped scope), matching plan's
+      // managed-view-under-scope order — projecting scope here would strip the
+      // owner edges a policy rule reads and trip the gate against a different
+      // view than the plan fingerprinted (§scope).
+      reextract: (p) => ctx.extract(p, { redactSecrets }),
       fingerprintGate: !force,
     });
 
