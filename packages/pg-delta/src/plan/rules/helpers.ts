@@ -198,7 +198,9 @@ export function identitySequenceNameClause(
   const isDefault =
     sequence.schema === ref.schema &&
     sequence.name === defaultIdentitySequenceName(ref.table, ref.column);
-  return isDefault ? "" : `SEQUENCE NAME ${rel(sequence.schema, sequence.name)}`;
+  return isDefault
+    ? ""
+    : `SEQUENCE NAME ${rel(sequence.schema, sequence.name)}`;
 }
 
 /** ` (SEQUENCE NAME … INCREMENT BY … MINVALUE … …)` for an identity sequence

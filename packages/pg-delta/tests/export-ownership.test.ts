@@ -517,7 +517,14 @@ describe("schema apply: explicit --shadow owner guard", () => {
     const dir = mkdtempSync(join(tmpdir(), "expown5-"));
     expect(
       (
-        await runCli(["schema", "export", "--source", src.uri, "--out-dir", dir])
+        await runCli([
+          "schema",
+          "export",
+          "--source",
+          src.uri,
+          "--out-dir",
+          dir,
+        ])
       ).exitCode,
     ).toBe(0);
     expect(readManifest(dir).defaultOwner).toBe("own5_a");
@@ -574,9 +581,7 @@ describe("schema apply: manifest-absent directory is verbose", () => {
     await cluster.adminPool
       .query(`CREATE ROLE own6_a SUPERUSER LOGIN PASSWORD 'a'`)
       .catch(() => {});
-    await cluster.adminPool
-      .query(`CREATE ROLE own6_b NOLOGIN`)
-      .catch(() => {});
+    await cluster.adminPool.query(`CREATE ROLE own6_b NOLOGIN`).catch(() => {});
     await cluster.adminPool.query(`GRANT own6_b TO own6_a`).catch(() => {});
 
     // hand-authored dir: NO manifest file; explicit OWNER TO own6_a.
