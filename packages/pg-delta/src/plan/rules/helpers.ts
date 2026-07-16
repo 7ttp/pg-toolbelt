@@ -424,7 +424,12 @@ export function replicaIdentitySpec(fact: Fact, view: FactView): ActionSpec {
 }
 
 export function grantActions(fact: Fact, verb: "grant"): ActionSpec[] {
-  const id = fact.id as { kind: "acl"; target: StableId; grantee: string };
+  const id = fact.id as {
+    kind: "acl";
+    target: StableId;
+    grantee: string;
+    column?: string;
+  };
   const grantee = id.grantee === "PUBLIC" ? "PUBLIC" : qid(id.grantee);
   const privileges = p(fact, "privileges") as string[];
   const grantable = new Set((p(fact, "grantable") as string[]) ?? []);
@@ -432,23 +437,33 @@ export function grantActions(fact: Fact, verb: "grant"): ActionSpec[] {
   const withOption = privileges.filter((priv) => grantable.has(priv));
   const consumes: StableId[] =
     id.grantee === "PUBLIC" ? [] : [{ kind: "role", name: id.grantee }];
+  // Column-level grant: each privilege is qualified by the column
+  // (`SELECT (col)`) and REVOKE ALL takes the column list too. Object-level
+  // grants render the bare privilege list.
+  const col = id.column;
+  const q = (privs: string[]): string =>
+    col === undefined
+      ? privs.join(", ")
+      : privs.map((priv) => `${priv} (${qid(col)})`).join(", ");
+  const revokeAll =
+    col === undefined ? "REVOKE ALL" : `REVOKE ALL (${qid(col)})`;
   const specs: ActionSpec[] = [
     // pg_dump's model: reset to a clean slate first — implicit default-
     // privilege grants on freshly created objects would otherwise linger
     {
-      sql: `REVOKE ALL ON ${grantTarget(id.target)} FROM ${grantee}`,
+      sql: `${revokeAll} ON ${grantTarget(id.target)} FROM ${grantee}`,
       consumes,
     },
   ];
   if (plain.length > 0) {
     specs.push({
-      sql: `GRANT ${plain.join(", ")} ON ${grantTarget(id.target)} TO ${grantee}`,
+      sql: `GRANT ${q(plain)} ON ${grantTarget(id.target)} TO ${grantee}`,
       consumes,
     });
   }
   if (withOption.length > 0) {
     specs.push({
-      sql: `GRANT ${withOption.join(", ")} ON ${grantTarget(id.target)} TO ${grantee} WITH GRANT OPTION`,
+      sql: `GRANT ${q(withOption)} ON ${grantTarget(id.target)} TO ${grantee} WITH GRANT OPTION`,
       consumes,
     });
   }

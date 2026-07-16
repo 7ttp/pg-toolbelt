@@ -3,6 +3,7 @@
  *  rewrite rules. */
 import type { StableId } from "../core/stable-id.ts";
 import {
+  aclJson,
   aclJsonMemberAware,
   type ExtractContext,
   memberExtensionExpr,
@@ -40,6 +41,11 @@ export async function extractTables(ctx: ExtractContext): Promise<void> {
             JOIN pg_class pc ON pc.oid = inh.inhparent
             JOIN pg_namespace pn ON pn.oid = pc.relnamespace
             WHERE inh.inhrelid = c.oid
+            -- Multi-parent support is tracked separately; until then capture the
+            -- FIRST-declared parent deterministically. Without ORDER BY the
+            -- unordered LIMIT 1 can pick a different parent across extractions,
+            -- flapping the fact hash and causing spurious table replaces.
+            ORDER BY inh.inhseqno
             LIMIT 1) AS parent_table,
            obj_description(c.oid, 'pg_class') AS comment,
            ${aclJsonMemberAware("c.relacl", "r", "c.relowner", "pg_class", "c.oid")} AS acl,
@@ -126,7 +132,12 @@ export async function extractColumns(ctx: ExtractContext): Promise<void> {
              WHERE co.oid = a.attcollation)
            END AS collation,
            pg_get_expr(ad.adbin, ad.adrelid) AS default_expr,
-           col_description(c.oid, a.attnum) AS comment
+           col_description(c.oid, a.attnum) AS comment,
+           -- column-level ACL (pg_attribute.attacl). Columns have no built-in
+           -- default privileges, so acldefault('c', owner) is empty: a NULL
+           -- attacl yields no acl facts, and a non-NULL one lists only explicit
+           -- GRANT SELECT/INSERT/UPDATE/REFERENCES (col) entries.
+           ${aclJson("a.attacl", "c", "c.relowner")} AS acl
     FROM pg_attribute a
     JOIN pg_class c ON c.oid = a.attrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -197,6 +208,21 @@ export async function extractColumns(ctx: ExtractContext): Promise<void> {
         },
         parent: columnId,
         payload: { expr: row["default_expr"] as string },
+      });
+    }
+    // Column-level grants (attacl): one acl satellite per grantee, targeting the
+    // owning relation but qualified by this column. Parent is the column so the
+    // grant folds into the column/table drop, exactly like the default above.
+    for (const acl of parseAcl(row["acl"])) {
+      facts.push({
+        id: {
+          kind: "acl",
+          target: tableId,
+          grantee: acl.grantee,
+          column: String(row["name"]),
+        },
+        parent: columnId,
+        payload: { privileges: acl.privileges, grantable: acl.grantable },
       });
     }
   }

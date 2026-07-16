@@ -68,7 +68,11 @@ export type StableId =
     }
   | { kind: "publicationSchema"; publication: string; schema: string }
   | { kind: "comment"; target: StableId }
-  | { kind: "acl"; target: StableId; grantee: string }
+  /** `column` is set for a COLUMN-level grant (`pg_attribute.attacl`,
+   *  e.g. `GRANT SELECT (col) ON t TO r`): `target` stays the owning relation
+   *  and `column` names the attribute the privileges are qualified by. Absent
+   *  for an ordinary object-level ACL. */
+  | { kind: "acl"; target: StableId; grantee: string; column?: string }
   | { kind: "securityLabel"; target: StableId; provider: string }
   | {
       kind: "defaultPrivilege";
@@ -154,7 +158,10 @@ export function encodeId(id: StableId): string {
     case "comment":
       return `comment:(${encodeId(id.target)})`;
     case "acl":
-      return `acl:(${encodeId(id.target)}).${seg(id.grantee)}`;
+      // column suffix only when set, so object-level ACL ids stay byte-identical
+      return `acl:(${encodeId(id.target)}).${seg(id.grantee)}${
+        id.column !== undefined ? `.${seg(id.column)}` : ""
+      }`;
     case "securityLabel":
       return `securityLabel:(${encodeId(id.target)}).${seg(id.provider)}`;
     case "defaultPrivilege":

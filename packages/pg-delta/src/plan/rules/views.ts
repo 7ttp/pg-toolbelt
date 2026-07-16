@@ -1,6 +1,6 @@
 /** Rule definitions for views, materialized views, and rewrite rules. */
 import { qid, rel } from "../render.ts";
-import type { KindRules } from "../rules.ts";
+import type { ActionSpec, KindRules } from "../rules.ts";
 import {
   enabledPhrase,
   p,
@@ -98,7 +98,20 @@ export const viewRules: Record<string, KindRules> = {
     weight: 15,
     cascadesToChildren: true,
     rebuildable: true,
-    create: (fact) => [{ sql: str(p(fact, "def")) }],
+    create: (fact) => {
+      const id = fact.id as { schema: string; table: string; name: string };
+      // A fresh CREATE RULE always lands ENABLED (origin). When the desired rule
+      // is disabled/replica/always, append the follow-up ALTER so the hashed
+      // ev_enabled state converges — mirrors the trigger create path.
+      const specs: ActionSpec[] = [{ sql: str(p(fact, "def")) }];
+      const enabled = p(fact, "enabled");
+      if (enabled != null && enabled !== "O") {
+        specs.push({
+          sql: `ALTER TABLE ${rel(id.schema, id.table)} ${enabledPhrase(str(enabled))} RULE ${qid(id.name)}`,
+        });
+      }
+      return specs;
+    },
     drop: (fact) => {
       const id = fact.id as { schema: string; table: string; name: string };
       return {

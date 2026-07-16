@@ -91,7 +91,7 @@ export const typeRules: Record<string, KindRules> = {
       const id = fact.id as { schema: string; name: string };
       return `ALTER TYPE ${rel(id.schema, id.name)}`;
     }),
-    create: (fact, view) => {
+    create: (fact, view, _params, sourceView) => {
       const id = fact.id as { schema: string; name: string };
       const relName = rel(id.schema, id.name);
       const variant = str(p(fact, "variant"));
@@ -122,6 +122,35 @@ export const typeRules: Record<string, KindRules> = {
         for (const a of attrFacts) alsoProduces.push(a.id);
         sql = `CREATE TYPE ${relName} AS (${attrs.join(", ")})`;
       } else {
+        // GUARD (range variant): every range attribute is "replace", so any
+        // change drops and recreates the type. A table column is NOT a
+        // rebuildable kind, so if a SURVIVING user column depends on this range
+        // type PostgreSQL rejects the DROP at apply ("cannot drop type … other
+        // objects depend on it"). Fail loud at plan time — mirrors the in-use
+        // composite ALTER ATTRIBUTE guard below. Only a REPLACE (the type is
+        // present in the source) can hit this; a fresh create brings its
+        // columns with it. Full in-place range column migration is tracked
+        // separately.
+        if (sourceView?.get(fact.id) !== undefined) {
+          const inUse = compositeUserColumns(view, fact.id).filter(
+            (colId) => sourceView.get(colId) !== undefined,
+          );
+          if (inUse.length > 0) {
+            const cols = inUse
+              .map((c) => {
+                const col = c as {
+                  schema: string;
+                  table: string;
+                  name: string;
+                };
+                return `${rel(col.schema, col.table)}.${qid(col.name)}`;
+              })
+              .join(", ");
+            throw new Error(
+              `range type ${relName}: cannot replace an in-use range type — column(s) ${cols} depend on it, and PostgreSQL forbids dropping a type while a column uses it. Replacing an in-use range type is not supported yet; drop the using column(s), or recreate the type, first.`,
+            );
+          }
+        }
         const parts = [`SUBTYPE = ${str(p(fact, "subtype"))}`];
         const opclass = p(fact, "subtypeOpclass");
         if (opclass != null) parts.push(`SUBTYPE_OPCLASS = ${str(opclass)}`);

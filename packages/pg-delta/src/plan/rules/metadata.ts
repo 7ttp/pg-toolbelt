@@ -74,10 +74,20 @@ export const metadataRules: Record<string, KindRules> = {
     metadata: true,
     create: (fact) => grantActions(fact, "grant"),
     drop: (fact) => {
-      const id = fact.id as { kind: "acl"; target: StableId; grantee: string };
+      const id = fact.id as {
+        kind: "acl";
+        target: StableId;
+        grantee: string;
+        column?: string;
+      };
       const grantee = id.grantee === "PUBLIC" ? "PUBLIC" : qid(id.grantee);
       const consumes: StableId[] =
         id.grantee === "PUBLIC" ? [] : [{ kind: "role", name: id.grantee }];
+      // Column-level grants revoke with the column list; object-level ones don't.
+      const revokeAll =
+        id.column === undefined
+          ? "REVOKE ALL"
+          : `REVOKE ALL (${qid(id.column)})`;
       const init = p(fact, "_initPrivs") as
         | { privileges: string[]; grantable: string[] }
         | undefined;
@@ -86,7 +96,7 @@ export const metadataRules: Record<string, KindRules> = {
       // REVOKE so the replace-path drop elision still fires.
       if (init === undefined) {
         return {
-          sql: `REVOKE ALL ON ${grantTarget(id.target)} FROM ${grantee}`,
+          sql: `${revokeAll} ON ${grantTarget(id.target)} FROM ${grantee}`,
           consumes,
         };
       }
