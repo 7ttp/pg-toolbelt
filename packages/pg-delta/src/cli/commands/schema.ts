@@ -152,6 +152,7 @@ export function writeExportFiles(
     profile?: string;
     scope?: "database" | "cluster";
     baselineDigest?: string;
+    defaultOwner?: string | null;
   },
 ): string[] {
   mkdirSync(outRoot, { recursive: true });
@@ -190,12 +191,14 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       "format-options": { type: "value" },
       "no-format": { type: "boolean" },
       scope: { type: "value" },
+      "default-owner": { type: "value" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
       process.stderr.write(
         `${err.message}\nUsage: pgdelta schema export --source <pg-url> --out-dir <dir> ` +
           `[--layout by-object|ordered|grouped] [--profile ${PROFILE_IDS}] [--strict-coverage] [--unsafe-show-secrets] [--scope database|cluster]\n` +
+          `  [--default-owner <role|none>] (which owner stays implicit; default: profile default or the database owner; "none" emits every OWNER TO)\n` +
           `  [--format-options '{"keywordCase":"upper","maxWidth":180}'] [--no-format]\n` +
           `    (SQL is pretty-printed by default: lowercase keywords, width 180; any layout)\n` +
           `  Grouped-layout options (only with --layout grouped):\n` +
@@ -367,7 +370,55 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
     // owner/REVOKE, so it must stay assumed — otherwise a profile-declared
     // baseline breaks the export's requirement guard (same pre-subtraction rule as
     // the assumed-schema seed).
-    const scopedView = projectManagementScope(view, exportScope);
+    // Resolve the DEFAULT OWNER whose ownership stays implicit in a database-scope
+    // export (no `ALTER … OWNER TO`): `--default-owner <role|none>` beats the
+    // profile-declared default, which beats the database owner (`datdba`). `none`
+    // is verbose (every owner serializes) and stamps a `null` manifest. `datdba`
+    // is queried at export time and never enters the fact model (it is
+    // export-command metadata). Only meaningful under database scope.
+    let resolvedDefaultOwner: string | null = null; // null ⇒ verbose / not applicable
+    if (exportScope === "database") {
+      const ownerFlag = flags["default-owner"];
+      if (ownerFlag === "none") {
+        resolvedDefaultOwner = null;
+      } else if (ownerFlag !== undefined && ownerFlag !== "") {
+        resolvedDefaultOwner = ownerFlag;
+      } else {
+        const profileDefault = assumed?.defaultOwner;
+        if (profileDefault !== undefined) {
+          resolvedDefaultOwner = profileDefault;
+        } else {
+          const r = await src.pool.query<{ owner: string }>(
+            `SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = current_database()`,
+          );
+          resolvedDefaultOwner = r.rows[0]?.owner ?? null;
+        }
+      }
+      // Warn when the resolved default owner differs from the export connection
+      // role: objects it owns will have OWNER TO suppressed, so applying the dir
+      // as anyone else re-introduces ownership drift (and `schema apply` guards
+      // against it). Point at `--default-owner` to override.
+      if (resolvedDefaultOwner !== null) {
+        const cu = (
+          await src.pool.query<{ u: string }>(`SELECT current_user AS u`)
+        ).rows[0]?.u;
+        if (cu !== undefined && cu !== resolvedDefaultOwner) {
+          process.stderr.write(
+            `  WARNING: the resolved default owner "${resolvedDefaultOwner}" differs from the export ` +
+              `connection role "${cu}"; ownership of its objects will be left implicit (no OWNER TO). ` +
+              `Apply this directory connecting as "${resolvedDefaultOwner}", or re-export with ` +
+              `--default-owner "${cu}" / --default-owner none.\n`,
+          );
+        }
+      }
+    }
+    const scopedView = projectManagementScope(
+      view,
+      exportScope,
+      resolvedDefaultOwner !== null
+        ? { defaultOwner: resolvedDefaultOwner }
+        : {},
+    );
     const scopeAssumedRoles =
       exportScope === "database"
         ? factBase
@@ -411,6 +462,12 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       // objects this export omitted would read as source-only drops.
       ...(ctx.baseline !== undefined
         ? { baselineDigest: ctx.baseline.digest }
+        : {}),
+      // stamp the resolved default owner (database scope only) so `schema apply`
+      // reconstructs the identical view and guards a divergent applier. A role
+      // name or `null` (verbose); omitted at cluster scope (ownership managed).
+      ...(exportScope === "database"
+        ? { defaultOwner: resolvedDefaultOwner }
         : {}),
     });
     if (removed.length > 0) {
@@ -511,6 +568,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       profile: { type: "value" },
       "restrict-to-applier": { type: "boolean" },
       "strict-coverage": { type: "boolean" },
+      "strict-function-bodies": { type: "boolean" },
       "no-reorder": { type: "boolean" },
       "unsafe-show-secrets": { type: "boolean" },
       "isolated-shadow": { type: "boolean" },
@@ -523,7 +581,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       process.stderr.write(
         `${err.message}\nUsage: pgdelta schema apply --dir <dir> --target <pg-url> [--shadow <pg-url>] ` +
           `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... ` +
-          `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--strict-coverage] [--no-reorder] [--unsafe-show-secrets] [--isolated-shadow] [--scope database|cluster] [--skip-cluster-ddl] [--keep-shadow]\n` +
+          `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--strict-coverage] [--strict-function-bodies] [--no-reorder] [--unsafe-show-secrets] [--isolated-shadow] [--scope database|cluster] [--skip-cluster-ddl] [--keep-shadow]\n` +
           `  --shadow omitted: a co-located shadow database is created on the target's cluster (database scope only) and dropped after.\n`,
       );
       process.exit(2);
@@ -694,6 +752,19 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
 
   const shadow = makePool(shadowUrl);
   const tgt = makePool(targetUrl);
+  // Close the pools and drop the co-located throwaway database. Shared by the
+  // normal `finally` AND the early-exit guards inside the try below: those call
+  // `process.exit`, which SKIPS the finally, so without releasing here first
+  // they would leak the co-located shadow database (`--keep-shadow` keeps it).
+  const releaseResources = async (): Promise<void> => {
+    await Promise.all([shadow.end(), tgt.end()]);
+    if (coLocated !== undefined) {
+      if (flags["keep-shadow"]) {
+        process.stderr.write(`  Kept shadow database ${coLocated.name}\n`);
+      }
+      await coLocated.cleanup();
+    }
+  };
   try {
     // Secret redaction applies to BOTH sides so the diff stays consistent. With
     // --unsafe-show-secrets the declarative SQL's real FDW/server credentials and
@@ -733,6 +804,84 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         ctx.baseline?.digest,
         "export manifest",
       );
+    }
+
+    // Resolve the DEFAULT OWNER the export kept implicit, so plan/apply/prove
+    // reconstruct the identical database-scope managed view. The manifest field
+    // is three-valued:
+    //   - a role NAME → use it, and GUARD: the target connection role MUST equal
+    //     it, or objects it left implicitly owned would reload owned by a
+    //     different role → spurious ownership drift. Fail closed (exit 2).
+    //   - null → verbose export (every OWNER TO explicit); no default, no guard.
+    //   - ABSENT (pre-feature / hand-authored dir) → resolve the chain against
+    //     the TARGET (profile default > target `datdba`) and WARN.
+    // Only applies under database scope (cluster scope manages ownership fully).
+    let applyDefaultOwner: string | undefined;
+    if (scope === "database") {
+      const mdo = manifest?.defaultOwner; // string | null | undefined
+      if (typeof mdo === "string") {
+        const cu = (
+          await tgt.pool.query<{ u: string }>(`SELECT current_user AS u`)
+        ).rows[0]?.u;
+        if (cu !== mdo) {
+          process.stderr.write(
+            `schema apply: the export's default owner "${mdo}" does not match the target ` +
+              `connection role "${cu}". Objects the export left implicitly owned by "${mdo}" ` +
+              `would reload owned by "${cu}", producing spurious ownership drift.\n` +
+              `  Resolve one of:\n` +
+              `    - connect as "${mdo}" (--target <url for ${mdo}>), or\n` +
+              `    - re-export with --default-owner "${cu}", or\n` +
+              `    - re-export with --default-owner none (emit every OWNER TO).\n`,
+          );
+          // release first: process.exit skips the finally that drops the
+          // co-located shadow this apply already provisioned above.
+          await releaseResources();
+          process.exit(2);
+        }
+        // An explicit --shadow loads the omitted-`OWNER TO` objects as ITS OWN
+        // connection role. If that role differs from the stamped default, those
+        // objects reload owned by the shadow user and — since the projection
+        // prunes only owner edges to the default — the plan emits spurious
+        // `ALTER … OWNER TO <shadow user>` (or fails the requirement guard when
+        // that role is absent on the target). Guard it too. The co-located
+        // shadow needs no check: it reuses the same target credentials validated
+        // above.
+        if (shadowFlag !== undefined) {
+          const scu = (
+            await shadow.pool.query<{ u: string }>(`SELECT current_user AS u`)
+          ).rows[0]?.u;
+          if (scu !== mdo) {
+            process.stderr.write(
+              `schema apply: the export's default owner "${mdo}" does not match the --shadow ` +
+                `connection role "${scu}". Objects the export left implicitly owned by "${mdo}" ` +
+                `would load into the shadow owned by "${scu}", producing spurious ownership drift.\n` +
+                `  Resolve one of:\n` +
+                `    - point --shadow at a connection whose role is "${mdo}", or\n` +
+                `    - re-export with --default-owner none (emit every OWNER TO).\n`,
+            );
+            await releaseResources();
+            process.exit(2);
+          }
+        }
+        applyDefaultOwner = mdo;
+      } else if (mdo === null) {
+        applyDefaultOwner = undefined; // verbose export — no implicit default
+      } else {
+        // Manifest field ABSENT (pre-feature export / hand-authored dir): the
+        // directory never opted into default-owner suppression, so apply it
+        // VERBOSE — the files are the whole truth and every `OWNER TO` they
+        // contain is honored as written. Do NOT synthesize a default from the
+        // profile/datdba and prune owner edges to it: that silently drops an
+        // explicit `ALTER … OWNER TO <role>` when the target object is owned by
+        // a different role. Suppression is an export-time choice the manifest
+        // records; a manifest-less dir made no such choice.
+        applyDefaultOwner = undefined;
+        process.stderr.write(
+          `  NOTE: the directory records no default owner, so it is applied verbose ` +
+            `(all ownership honored as written). Re-export with the current pg-delta to ` +
+            `record a default owner.\n`,
+        );
+      }
     }
 
     // Extension shadow precheck: some extensions (pg_cron) can only run their
@@ -991,6 +1140,11 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         // map (even empty) once we seeded, so the identity gating fully replaces
         // the schema-name gating for the CLI path.
         ...(seededSchemas.length > 0 ? { seededSchemas, seededRoutines } : {}),
+        // `--strict-function-bodies` restores the fatal gate for a USER routine
+        // whose body fails the check-on re-validation. Default (flag absent) is
+        // lenient: such a failure is a loud warning and the load proceeds, since
+        // apply materialises exactly what was declared under check-off anyway.
+        strictFunctionBodies: flags["strict-function-bodies"] === true,
         // A declarative dir that carries cluster-level role state (CREATE ROLE,
         // membership grants — e.g. `cluster/roles.sql`) trips the default
         // `databaseScratch` leak guard. `--isolated-shadow` asserts the shadow is
@@ -1057,6 +1211,11 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
               ...assumedTargetRoles,
             ],
           }
+        : {}),
+      // the default owner the export kept implicit; plan stamps it so the apply
+      // fingerprint gate reconstructs the identical view.
+      ...(applyDefaultOwner !== undefined
+        ? { defaultOwner: applyDefaultOwner }
         : {}),
     };
     const tPlan0 = Date.now();
@@ -1126,18 +1285,14 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         );
         process.stderr.write(`  sql: ${report.error.sql}\n`);
       }
+      // release first: process.exit skips the finally (co-located shadow leak).
+      await releaseResources();
       process.exit(1);
     }
   } finally {
-    await Promise.all([shadow.end(), tgt.end()]);
     // drop the co-located throwaway database (after our pools close so nothing
     // holds a connection to it); --keep-shadow makes cleanup a no-op.
-    if (coLocated !== undefined) {
-      if (flags["keep-shadow"]) {
-        process.stderr.write(`  Kept shadow database ${coLocated.name}\n`);
-      }
-      await coLocated.cleanup();
-    }
+    await releaseResources();
   }
 }
 
