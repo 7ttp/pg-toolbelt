@@ -185,6 +185,61 @@ describe("owner edge: out-of-view owner role prunes ownership (skipAuth eliminat
     // There must be NO ALTER SCHEMA OWNER TO action
     const ownerAction = thePlan.actions.find((a) => a.sql.includes("OWNER TO"));
     expect(ownerAction).toBeUndefined();
+
+    // …and ownership must not leak via a folded CREATE SCHEMA AUTHORIZATION
+    // either — the excluded role must never appear in any emitted SQL.
+    const authLeak = thePlan.actions.find((a) =>
+      a.sql.includes('AUTHORIZATION "sys"'),
+    );
+    expect(authLeak).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test (c'): a policy-excluded owner role must NOT be laundered back in via a
+// retained dangling owner edge. A kept object (schema app) carries a USAGE
+// ACL grant to the excluded role `sys`; excluding `sys` prunes the owner edge
+// AND leaves the ACL's requirement on `sys` unsatisfied, so the planner must
+// FAIL FAST with a missing-requirement error rather than silently assuming the
+// role via the (previously) retained owner edge. Unit-level, no Docker.
+// ---------------------------------------------------------------------------
+
+describe("owner edge: policy-excluded owner role is not laundered back via a dangling owner edge", () => {
+  test("kept schema's ACL grant to excluded role sys → plan throws missing requirement", () => {
+    const schemaId: StableId = { kind: "schema", name: "app" };
+    const roleId: StableId = { kind: "role", name: "sys" };
+    const aclId: StableId = {
+      kind: "acl",
+      target: schemaId,
+      grantee: "sys",
+    };
+
+    // Source: empty
+    const source = buildFactBase([], []);
+
+    // Desired: schema app + role sys + a USAGE grant to sys + owner edge to sys
+    const desired = buildFactBase(
+      [
+        { id: schemaId, payload: {} },
+        { id: roleId, payload: {} },
+        {
+          id: aclId,
+          parent: schemaId,
+          payload: { privileges: ["USAGE"], grantable: [] },
+        },
+      ],
+      [{ from: schemaId, to: roleId, kind: "owner" }],
+    );
+
+    // Exclude every role (NO scope) — sys is projected out of the view.
+    expect(() =>
+      plan(source, desired, {
+        policy: {
+          id: "t",
+          filter: [{ match: { kind: "role" }, action: "exclude" }],
+        },
+      }),
+    ).toThrow(/missing requirement/);
   });
 });
 

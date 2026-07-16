@@ -249,9 +249,18 @@ describe("loadSqlFiles (shadow frontend)", () => {
             },
           ],
           shadow.pool,
+          // A user-routine body-lint is a WARNING by default now (lenient
+          // function bodies); the fatal re-validation throw is gated on the
+          // strictFunctionBodies opt-in.
+          { strictFunctionBodies: true },
         ),
       );
       expect(error).toBeInstanceOf(ShadowLoadError);
+      const detail = (error as ShadowLoadError).details.find(
+        (d) => d.code === "invalid_routine_body",
+      );
+      expect(detail).toBeDefined();
+      expect(detail?.severity).toBe("error");
     } finally {
       await shadow.drop();
     }

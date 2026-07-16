@@ -63,11 +63,17 @@ export function excludeFactsAndDescendants(
   const keptEdges: DependencyEdge[] = fb.edges.filter((e) => {
     const fromSurvives = survives.has(encodeId(e.from));
     if (fromSurvives && survives.has(encodeId(e.to))) return true;
-    // Ownership carve-out: retain a surviving object's owner→role edge even when
-    // the role endpoint was removed, so a view already carrying retained dangling
-    // owner edges (a scope projection re-run through this primitive) keeps
-    // serializing OWNER TO instead of silently dropping it.
-    return fromSurvives && retainOwnerRoleDangling(e);
+    // Ownership carve-out invariant: PRESERVE an owner→role edge that was
+    // ALREADY dangling on input (e.g. a scope projection re-run through this
+    // primitive keeps serializing OWNER TO instead of silently dropping it),
+    // but NEVER newly dangle an edge whose endpoint THIS exclusion removes.
+    // Minting a fresh dangling owner edge for a role THIS call is projecting out
+    // (e.g. a policy hard-exclusion) would launder the excluded role back in as
+    // `CREATE SCHEMA … AUTHORIZATION <role>` / `OWNER TO <role>` (auto-assumed in
+    // plan.ts) and silence the missing-requirement guard. Only
+    // `projectManagementScope` (its own edge loop) is entitled to mint dangling
+    // owner edges.
+    return fromSurvives && retainOwnerRoleDangling(e) && !fb.has(e.to);
   });
   // Carry the reference-only set forward for surviving facts. Otherwise a scope
   // or provenance projection (which rebuilds the FactBase) silently drops the
