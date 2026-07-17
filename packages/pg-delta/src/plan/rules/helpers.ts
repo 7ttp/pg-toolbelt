@@ -315,9 +315,28 @@ export function policySql(fact: Fact): string {
  */
 export function sequenceOwnedBySpecs(
   fact: Fact,
-  opts: { allowNone?: boolean } = {},
+  opts: {
+    allowNone?: boolean;
+    /** the previous owner (an ownedBy payload value) when this is an in-place
+     *  reassignment — released so the ALTER runs before a same-plan DROP of the
+     *  old owning column/table, which would otherwise cascade the sequence away
+     *  before it is re-owned. */
+    releaseOld?: { schema: string; table: string; column: string } | null;
+  } = {},
 ): ActionSpec[] {
   const id = fact.id as { schema: string; name: string };
+  const old = opts.releaseOld;
+  const releases: StableId[] =
+    old != null
+      ? [
+          {
+            kind: "column",
+            schema: old.schema,
+            table: old.table,
+            name: old.column,
+          },
+        ]
+      : [];
   const ownedBy = p(fact, "ownedBy") as {
     schema: string;
     table: string;
@@ -325,7 +344,12 @@ export function sequenceOwnedBySpecs(
   } | null;
   if (ownedBy == null) {
     return opts.allowNone
-      ? [{ sql: `ALTER SEQUENCE ${rel(id.schema, id.name)} OWNED BY NONE` }]
+      ? [
+          {
+            sql: `ALTER SEQUENCE ${rel(id.schema, id.name)} OWNED BY NONE`,
+            ...(releases.length > 0 ? { releases } : {}),
+          },
+        ]
       : [];
   }
   return [
@@ -339,6 +363,7 @@ export function sequenceOwnedBySpecs(
           name: ownedBy.column,
         },
       ],
+      ...(releases.length > 0 ? { releases } : {}),
     },
   ];
 }
@@ -482,13 +507,28 @@ export function aggSig(fact: Fact): string {
   return args.length > 0 ? args.join(", ") : "*";
 }
 
-export const DEFACL_OBJTYPE: Record<string, string> = {
+const DEFACL_OBJTYPE: Record<string, string> = {
   r: "TABLES",
   S: "SEQUENCES",
   f: "FUNCTIONS",
   T: "TYPES",
   n: "SCHEMAS",
+  L: "LARGE OBJECTS",
 };
+
+/** Render a `pg_default_acl.defaclobjtype` code, or throw loud — an unmapped
+ *  code silently rendered as `TABLES` (the old `?? "TABLES"` fallback) would
+ *  emit the WRONG DDL for a future/unhandled objtype instead of surfacing the
+ *  gap. */
+function defaclObjType(objtype: string): string {
+  const rendered = DEFACL_OBJTYPE[objtype];
+  if (rendered === undefined) {
+    throw new Error(
+      `defaultPrivilege: unmapped pg_default_acl.defaclobjtype "${objtype}" — add it to DEFACL_OBJTYPE (helpers.ts)`,
+    );
+  }
+  return rendered;
+}
 
 export function defaultPrivPrefix(id: {
   role: string;
@@ -532,7 +572,7 @@ export function defaultPrivilegeCreateActions(fact: Fact): ActionSpec[] {
     grantee: string;
   };
   const grantee = id.grantee === "PUBLIC" ? "PUBLIC" : qid(id.grantee);
-  const objtype = DEFACL_OBJTYPE[id.objtype] ?? "TABLES";
+  const objtype = defaclObjType(id.objtype);
   const consumes = defaultPrivConsumes(id);
   if (isRevokedDefaultMarker(fact)) {
     return [
@@ -572,7 +612,7 @@ export function defaultPrivilegeDropActions(fact: Fact): ActionSpec {
     grantee: string;
   };
   const grantee = id.grantee === "PUBLIC" ? "PUBLIC" : qid(id.grantee);
-  const objtype = DEFACL_OBJTYPE[id.objtype] ?? "TABLES";
+  const objtype = defaclObjType(id.objtype);
   const consumes = defaultPrivConsumes(id);
   if (isRevokedDefaultMarker(fact)) {
     const restored = (p(fact, "_revokedDefault") as string[]) ?? [];

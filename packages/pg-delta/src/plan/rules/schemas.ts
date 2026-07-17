@@ -76,10 +76,18 @@ export const schemaRules: Record<string, KindRules> = {
     }),
     attributes: {
       schema: {
-        alter: (fact, _from, to) => ({
+        // consume the NEW schema so the relocation is ordered after its CREATE;
+        // release the OLD schema so it runs before a same-plan DROP SCHEMA of
+        // the old home (otherwise the drop can be sequenced first and fail).
+        alter: (fact, from, to) => ({
           sql: `ALTER EXTENSION ${qid((fact.id as { name: string }).name)} SET SCHEMA ${qid(str(to))}`,
           consumes: [{ kind: "schema", name: str(to) }],
+          releases: [{ kind: "schema", name: str(from) }],
         }),
+        // A non-relocatable extension rejects SET SCHEMA, so relocating it must
+        // be a drop + recreate in the new schema (its create rule emits the
+        // `SCHEMA <s>` clause). The relocatable flag is extracted per extension.
+        replaceWhen: (_from, _to, fact) => p(fact, "relocatable") === false,
       },
     },
   },
