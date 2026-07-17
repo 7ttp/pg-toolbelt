@@ -29,7 +29,7 @@
  */
 import type { Pool, PoolClient } from "pg";
 import type { Diagnostic } from "../core/diagnostic.ts";
-import type { FactBase } from "../core/fact.ts";
+import { buildFactBase, type FactBase } from "../core/fact.ts";
 import {
   extract,
   type ExtractOptions,
@@ -517,17 +517,23 @@ export async function loadSqlFiles(
   const seededSchemas = options.seededSchemas ?? [];
   const seededRoutines = options.seededRoutines;
   const strictFunctionBodies = options.strictFunctionBodies ?? false;
-  const preexisting = await shadow.query(
-    `
+  // isolatedCluster shadows may already carry a platform baseline (e.g. the
+  // Supabase CLI declarative seam). The empty guard is for co-located scratch
+  // databases only — requiring emptiness there prevents accidental loads into
+  // a non-scratch database on a shared cluster.
+  if (mode !== "isolatedCluster") {
+    const preexisting = await shadow.query(
+      `
     SELECT count(*)::int AS n FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
       AND n.nspname NOT LIKE 'pg\\_%'
       AND n.nspname <> ALL($1::text[])`,
-    [seededSchemas],
-  );
-  if ((preexisting.rows[0] as { n: number }).n > 0) {
-    throw new ShadowLoadError("shadow database is not empty", []);
+      [seededSchemas],
+    );
+    if ((preexisting.rows[0] as { n: number }).n > 0) {
+      throw new ShadowLoadError("shadow database is not empty", []);
+    }
   }
 
   // reject files that manage their own transaction (review finding 6): an
@@ -581,9 +587,36 @@ export async function loadSqlFiles(
   // a file whose error never changes is a genuine missing dependency (or cycle),
   // not something more rounds will resolve.
   const failStreak = new Map<string, { message: string; count: number }>();
+  let bootstrapMembershipStrip: {
+    roles: ReadonlySet<string>;
+    member: string;
+  } | null = null;
   const client = await shadow.connect();
   try {
     await client.query(`SET check_function_bodies = off`);
+    // PG 16+: CREATE ROLE no longer auto-grants the creator membership in the
+    // new role. Supabase's non-superuser `postgres` (CREATEROLE) then fails
+    // `CREATE SCHEMA … AUTHORIZATION new_role` with "must be able to SET ROLE"
+    // unless createrole_self_grant includes `set`. Best-effort — the GUC is
+    // absent on PG < 16, where creators still receive membership automatically.
+    //
+    // Those bootstrap memberships must NOT survive into the extracted desired
+    // state: planning them yields `GRANT role TO postgres WITH ADMIN OPTION`,
+    // which fails on apply with "ADMIN option cannot be granted back to your
+    // own grantor" (the applier is already the CREATE ROLE grantor).
+    let createroleSelfGrant = false;
+    try {
+      await client.query(
+        `SELECT set_config('createrole_self_grant', 'set, inherit', false)`,
+      );
+      createroleSelfGrant = true;
+    } catch {
+      /* PG < 16 or GUC unavailable */
+    }
+    const rolesBeforeSelfGrant =
+      createroleSelfGrant && mode === "isolatedCluster"
+        ? await client.query(`SELECT rolname FROM pg_roles ORDER BY 1`)
+        : null;
     while (pending.length > 0) {
       // Budget exhausted with files still pending: fail LOUD, never fall through
       // to extraction with a partially loaded shadow (review P1 #2). The SQL-file
@@ -653,6 +686,30 @@ export async function loadSqlFiles(
       }
       lastFailures = failures;
       pending = next;
+    }
+
+    // Capture createrole_self_grant bootstrap grants for post-extract stripping.
+    // REVOKE is insufficient: PG may leave an ADMIN membership whose grantor is
+    // the role that conferred CREATEROLE (not CURRENT_USER), which the applier
+    // cannot revoke — yet planning that membership yields a failing
+    // `GRANT … TO <applier> WITH ADMIN OPTION` on apply.
+    if (rolesBeforeSelfGrant !== null) {
+      const rolesAfterSelfGrant = await client.query(
+        `SELECT rolname FROM pg_roles ORDER BY 1`,
+      );
+      const beforeSet = new Set(
+        rolesBeforeSelfGrant.rows.map(
+          (r) => (r as { rolname: string }).rolname,
+        ),
+      );
+      const createdRoles = rolesAfterSelfGrant.rows
+        .map((r) => (r as { rolname: string }).rolname)
+        .filter((r) => !beforeSet.has(r));
+      const me = await client.query<{ u: string }>(`SELECT current_user AS u`);
+      bootstrapMembershipStrip = {
+        roles: new Set(createdRoles),
+        member: me.rows[0]!.u,
+      };
     }
 
     // shared-object isolation: role/membership leakage is an error in databaseScratch mode
@@ -899,8 +956,25 @@ export async function loadSqlFiles(
   // extractor is profile-aware when the caller supplied one (handler-aware
   // projection), else the raw core extractor.
   const result = await extractShadow(shadow, { source: "sqlFiles" });
+  let factBase = result.factBase;
+  if (
+    bootstrapMembershipStrip !== null &&
+    bootstrapMembershipStrip.roles.size > 0
+  ) {
+    const strip = bootstrapMembershipStrip;
+    const drop = (id: StableId): boolean =>
+      id.kind === "membership" &&
+      strip.roles.has(id.role) &&
+      id.member === strip.member;
+    const facts = factBase.facts().filter((f) => !drop(f.id));
+    const kept = new Set(facts.map((f) => encodeId(f.id)));
+    const edges = [...factBase.edges].filter(
+      (e) => kept.has(encodeId(e.from)) && kept.has(encodeId(e.to)),
+    );
+    factBase = buildFactBase(facts, edges, factBase.source, factBase.referenceOnly);
+  }
   return {
-    factBase: result.factBase,
+    factBase,
     pgVersion: result.pgVersion,
     diagnostics: [...result.diagnostics, ...seededBodyWarnings],
     rounds,
