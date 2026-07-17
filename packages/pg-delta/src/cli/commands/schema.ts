@@ -64,7 +64,6 @@ import { buildSchemaExport } from "../../frontends/schema-export.ts";
 import {
   planSchemaFiles,
   prepareSchemaFiles,
-  SchemaFrontendError,
 } from "../../frontends/schema-plan.ts";
 import {
   appendShadowCycleHint,
@@ -81,7 +80,7 @@ import {
   isShadowProvisionError,
   provisionCoLocatedShadow,
 } from "../shadow.ts";
-import { parseFlags, UsageError } from "../flags.ts";
+import { CliExit, parseFlags, UsageError } from "../flags.ts";
 import { effectiveProfileId, PROFILE_IDS, profileById } from "../profile.ts";
 import type { RenameMode } from "../../plan/renames.ts";
 
@@ -174,16 +173,15 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
     });
   } catch (err) {
     if (err instanceof UsageError) {
-      process.stderr.write(
+      throw new UsageError(
         `${err.message}\nUsage: pgdelta schema export --source <pg-url> --out-dir <dir> ` +
           `[--layout by-object|ordered|grouped] [--profile ${PROFILE_IDS}] [--strict-coverage] [--unsafe-show-secrets] [--scope database|cluster]\n` +
           `  [--default-owner <role|none>] (which owner stays implicit; default: profile default or the database owner; "none" emits every OWNER TO)\n` +
           `  [--format-options '{"keywordCase":"upper","maxWidth":180}'] [--no-format]\n` +
           `    (SQL is pretty-printed by default: lowercase keywords, width 180; any layout)\n` +
           `  Grouped-layout options (only with --layout grouped):\n` +
-          `    [--grouping-mode single-file|subdirectory] [--group-patterns <json>] [--flat-schemas <csv>] [--no-group-partitions]\n`,
+          `    [--grouping-mode single-file|subdirectory] [--group-patterns <json>] [--flat-schemas <csv>] [--no-group-partitions]`,
       );
-      process.exit(2);
     }
     throw err;
   }
@@ -199,19 +197,17 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
   if (exportScopeFlag === "database" || exportScopeFlag === "cluster") {
     exportScope = exportScopeFlag;
   } else if (exportScopeFlag !== undefined) {
-    process.stderr.write(
-      `--scope must be database or cluster (got: ${exportScopeFlag})\n`,
+    throw new UsageError(
+      `--scope must be database or cluster (got: ${exportScopeFlag})`,
     );
-    process.exit(2);
   }
   let layout: "by-object" | "ordered" | "grouped" = "by-object";
   if (flags["layout"] !== undefined) {
     const v = flags["layout"];
     if (v !== "by-object" && v !== "ordered" && v !== "grouped") {
-      process.stderr.write(
-        `--layout must be by-object, ordered, or grouped (got: ${v})\n`,
+      throw new UsageError(
+        `--layout must be by-object, ordered, or grouped (got: ${v})`,
       );
-      process.exit(2);
     }
     layout = v;
   }
@@ -226,10 +222,9 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       mode !== "single-file" &&
       mode !== "subdirectory"
     ) {
-      process.stderr.write(
-        `--grouping-mode must be single-file or subdirectory (got: ${mode})\n`,
+      throw new UsageError(
+        `--grouping-mode must be single-file or subdirectory (got: ${mode})`,
       );
-      process.exit(2);
     }
     let groupPatterns: ExportGroupingPattern[] | undefined;
     if (flags["group-patterns"] !== undefined) {
@@ -249,10 +244,9 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
         }
         groupPatterns = raw;
       } catch (e) {
-        process.stderr.write(
-          `--group-patterns must be JSON array of { pattern, name }: ${e instanceof Error ? e.message : String(e)}\n`,
+        throw new UsageError(
+          `--group-patterns must be JSON array of { pattern, name }: ${e instanceof Error ? e.message : String(e)}`,
         );
-        process.exit(2);
       }
     }
     const flatSchemas = flags["flat-schemas"]
@@ -280,10 +274,9 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
     : { keywordCase: "lower", maxWidth: 180 };
   if (flags["format-options"] !== undefined) {
     if (flags["no-format"]) {
-      process.stderr.write(
-        "--format-options and --no-format are mutually exclusive\n",
+      throw new UsageError(
+        "--format-options and --no-format are mutually exclusive",
       );
-      process.exit(2);
     }
     try {
       const raw = JSON.parse(flags["format-options"]) as unknown;
@@ -292,10 +285,9 @@ export async function cmdSchemaExport(args: string[]): Promise<void> {
       }
       format = raw as SqlFormatOptions;
     } catch (e) {
-      process.stderr.write(
-        `--format-options must be a JSON object (e.g. '{"keywordCase":"upper","maxWidth":180}'): ${e instanceof Error ? e.message : String(e)}\n`,
+      throw new UsageError(
+        `--format-options must be a JSON object (e.g. '{"keywordCase":"upper","maxWidth":180}'): ${e instanceof Error ? e.message : String(e)}`,
       );
-      process.exit(2);
     }
   }
 
@@ -417,13 +409,12 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     });
   } catch (err) {
     if (err instanceof UsageError) {
-      process.stderr.write(
+      throw new UsageError(
         `${err.message}\nUsage: pgdelta schema apply --dir <dir> --target <pg-url> [--shadow <pg-url>] ` +
           `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... ` +
           `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--strict-coverage] [--strict-function-bodies] [--no-reorder] [--unsafe-show-secrets] [--isolated-shadow] [--scope database|cluster] [--skip-cluster-ddl] [--keep-shadow]\n` +
-          `  --shadow omitted: a co-located shadow database is created on the target's cluster (database scope only) and dropped after.\n`,
+          `  --shadow omitted: a co-located shadow database is created on the target's cluster (database scope only) and dropped after.`,
       );
-      process.exit(2);
     }
     throw err;
   }
@@ -452,20 +443,18 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     scopeFlag !== "database" &&
     scopeFlag !== "cluster"
   ) {
-    process.stderr.write(
-      `--scope must be database or cluster (got: ${scopeFlag})\n`,
+    throw new UsageError(
+      `--scope must be database or cluster (got: ${scopeFlag})`,
     );
-    process.exit(2);
   }
   if (
     (scopeFlag === "database" || scopeFlag === "cluster") &&
     manifest?.scope !== undefined &&
     scopeFlag !== manifest.scope
   ) {
-    process.stderr.write(
-      `--scope ${scopeFlag} contradicts the export manifest scope (${manifest.scope}); re-export or drop --scope.\n`,
+    throw new UsageError(
+      `--scope ${scopeFlag} contradicts the export manifest scope (${manifest.scope}); re-export or drop --scope.`,
     );
-    process.exit(2);
   }
   let scope: ManagementScope = "database";
   if (scopeFlag === "database" || scopeFlag === "cluster") {
@@ -474,10 +463,9 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     scope = manifest.scope;
   }
   if (scope === "cluster" && !flags["isolated-shadow"]) {
-    process.stderr.write(
-      `--scope cluster manages cluster-global roles and must run against a dedicated shadow cluster; pass --isolated-shadow.\n`,
+    throw new UsageError(
+      `--scope cluster manages cluster-global roles and must run against a dedicated shadow cluster; pass --isolated-shadow.`,
     );
-    process.exit(2);
   }
 
   // --renames default for CLI is "prompt"
@@ -485,10 +473,9 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   if (flags["renames"] !== undefined) {
     const v = flags["renames"];
     if (v !== "auto" && v !== "prompt" && v !== "off") {
-      process.stderr.write(
-        `--renames must be auto, prompt, or off (got: ${v})\n`,
+      throw new UsageError(
+        `--renames must be auto, prompt, or off (got: ${v})`,
       );
-      process.exit(2);
     }
     renames = v;
   }
@@ -498,20 +485,18 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   for (const entry of acceptRenameRaw) {
     const eqIdx = entry.indexOf("=");
     if (eqIdx === -1) {
-      process.stderr.write(
-        `--accept-rename value must be in <from>=<to> form (got: ${entry})\n`,
+      throw new UsageError(
+        `--accept-rename value must be in <from>=<to> form (got: ${entry})`,
       );
-      process.exit(2);
     }
     const fromStr = entry.slice(0, eqIdx);
     const toStr = entry.slice(eqIdx + 1);
     try {
       acceptRenames.push({ from: parseId(fromStr), to: parseId(toStr) });
     } catch (e) {
-      process.stderr.write(
-        `--accept-rename: invalid stable-id in "${entry}": ${e instanceof Error ? e.message : String(e)}\n`,
+      throw new UsageError(
+        `--accept-rename: invalid stable-id in "${entry}": ${e instanceof Error ? e.message : String(e)}`,
       );
-      process.exit(2);
     }
   }
 
@@ -527,8 +512,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     flags["skip-cluster-ddl"] === true,
   );
   if (!prepared.ok) {
-    process.stderr.write(`schema apply: ${prepared.message}\n`);
-    process.exit(2);
+    throw new UsageError(`schema apply: ${prepared.message}`);
   }
   for (const s of prepared.skipped) {
     process.stderr.write(
@@ -545,16 +529,12 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   // opening any connection, exactly as `apply`/`prove` reconcile plan artifacts
   // (review P1).
   const manifestProfile = manifest?.profile;
-  let profileId: string | undefined;
-  try {
-    profileId = effectiveProfileId(flags["profile"], manifestProfile);
-  } catch (err) {
-    if (err instanceof UsageError) {
-      process.stderr.write(`${err.message}\n`);
-      process.exit(2);
-    }
-    throw err;
-  }
+  // effectiveProfileId throws UsageError on a --profile that contradicts the
+  // manifest; it propagates to main() (→ message + exit 2).
+  const profileId: string | undefined = effectiveProfileId(
+    flags["profile"],
+    manifestProfile,
+  );
 
   // Resolve the shadow: an explicit --shadow, else a co-located throwaway
   // database created on the TARGET's own cluster (quick mode). Co-located is
@@ -566,10 +546,9 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     shadowUrl = shadowFlag;
   } else {
     if (scope === "cluster") {
-      process.stderr.write(
-        `schema apply --scope cluster needs an explicit --shadow to a dedicated cluster; a co-located shadow (no --shadow) is database scope only.\n`,
+      throw new UsageError(
+        `schema apply --scope cluster needs an explicit --shadow to a dedicated cluster; a co-located shadow (no --shadow) is database scope only.`,
       );
-      process.exit(2);
     }
     process.stderr.write(
       `No --shadow given; creating a co-located shadow database on the target's cluster...\n`,
@@ -580,8 +559,10 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       });
     } catch (e) {
       if (isShadowProvisionError(e)) {
+        // Operational failure (couldn't create the shadow DB): keep the exit-2
+        // channel. No pools exist yet, so nothing to release.
         process.stderr.write(`schema apply: ${e.message}\n`);
-        process.exit(2);
+        throw new CliExit(2);
       }
       throw e;
     }
@@ -591,10 +572,11 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
 
   const shadow = makePool(shadowUrl);
   const tgt = makePool(targetUrl);
-  // Close the pools and drop the co-located throwaway database. Shared by the
-  // normal `finally` AND the early-exit guards inside the try below: those call
-  // `process.exit`, which SKIPS the finally, so without releasing here first
-  // they would leak the co-located shadow database (`--keep-shadow` keeps it).
+  // Close the pools and drop the co-located throwaway database. Called by the
+  // `finally` below, which always runs — the early-exit paths inside the try now
+  // THROW (CliExit / SchemaFrontendError / UsageError) instead of calling
+  // process.exit, so cleanup happens on every exit and the co-located shadow is
+  // never leaked (`--keep-shadow` keeps it).
   const releaseResources = async (): Promise<void> => {
     await Promise.all([shadow.end(), tgt.end()]);
     if (coLocated !== undefined) {
@@ -622,63 +604,52 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     }
 
     process.stderr.write("Extracting target / loading shadow...\n");
-    let planned;
-    try {
-      planned = await planSchemaFiles(tgt.pool, shadow.pool, files, {
-        profile,
-        scope,
-        ...(manifest !== undefined ? { manifest } : {}),
-        redactSecrets,
-        skipClusterDdl: flags["skip-cluster-ddl"] === true,
-        isolatedShadow: flags["isolated-shadow"] === true,
-        seedAssumedSchemas: coLocated !== undefined,
-        renames,
-        ...(acceptRenames.length > 0 ? { acceptRenames } : {}),
-        resolveOptions: {
-          restrictToApplier: flags["restrict-to-applier"],
-        },
-        strictFunctionBodies: flags["strict-function-bodies"] === true,
-        reorder: !flags["no-reorder"],
-        onWarning: (message) => {
-          if (message.startsWith("the directory records no default owner")) {
-            // already printed above for CLI parity
-            return;
-          }
-          process.stderr.write(`  WARNING: ${message}\n`);
-        },
-        onShadowLoadError: (error, ctx) => {
-          let enriched = rewriteReorderedShadowError(
-            error,
-            ctx.orderedFiles!,
+    // planSchemaFiles throws SchemaFrontendError (baseline mismatch, cron
+    // precheck, …) / UsageError; both propagate to main() (→ message + exit 2).
+    // A ShadowLoadError propagates too (main's generic path → details + exit 1).
+    // The finally below still runs, dropping any co-located shadow.
+    const planned = await planSchemaFiles(tgt.pool, shadow.pool, files, {
+      profile,
+      scope,
+      ...(manifest !== undefined ? { manifest } : {}),
+      redactSecrets,
+      skipClusterDdl: flags["skip-cluster-ddl"] === true,
+      isolatedShadow: flags["isolated-shadow"] === true,
+      seedAssumedSchemas: coLocated !== undefined,
+      renames,
+      ...(acceptRenames.length > 0 ? { acceptRenames } : {}),
+      resolveOptions: {
+        restrictToApplier: flags["restrict-to-applier"],
+      },
+      strictFunctionBodies: flags["strict-function-bodies"] === true,
+      reorder: !flags["no-reorder"],
+      onWarning: (message) => {
+        if (message.startsWith("the directory records no default owner")) {
+          // already printed above for CLI parity
+          return;
+        }
+        process.stderr.write(`  WARNING: ${message}\n`);
+      },
+      onShadowLoadError: (error, ctx) => {
+        let enriched = rewriteReorderedShadowError(
+          error,
+          ctx.orderedFiles!,
+          ctx.originalSqlByName,
+        );
+        const nonConverging = error.details.some(
+          (d) =>
+            d.code === "stuck_statement" || d.code === "max_rounds_exceeded",
+        );
+        if (nonConverging) {
+          enriched = appendShadowCycleHint(
+            enriched,
+            ctx.cycles,
             ctx.originalSqlByName,
           );
-          const nonConverging = error.details.some(
-            (d) =>
-              d.code === "stuck_statement" || d.code === "max_rounds_exceeded",
-          );
-          if (nonConverging) {
-            enriched = appendShadowCycleHint(
-              enriched,
-              ctx.cycles,
-              ctx.originalSqlByName,
-            );
-          }
-          return enriched;
-        },
-      });
-    } catch (err) {
-      if (err instanceof SchemaFrontendError) {
-        process.stderr.write(`schema apply: ${err.message}\n`);
-        await releaseResources();
-        process.exit(2);
-      }
-      if (err instanceof UsageError) {
-        process.stderr.write(`${err.message}\n`);
-        await releaseResources();
-        process.exit(2);
-      }
-      throw err;
-    }
+        }
+        return enriched;
+      },
+    });
 
     printDiagnostics(planned.loadDiagnostics, { label: "shadow" });
     printDiagnostics(planned.targetDiagnostics, { label: "target" });
@@ -739,8 +710,9 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         );
         process.stderr.write(`  sql: ${report.error.sql}\n`);
       }
-      await releaseResources();
-      process.exit(1);
+      // The finally below releases resources (drops any co-located shadow);
+      // main() maps CliExit(1) → exit 1 with no extra banner.
+      throw new CliExit(1);
     }
   } finally {
     // drop the co-located throwaway database (after our pools close so nothing
@@ -757,10 +729,9 @@ export async function cmdSchemaLint(args: string[]): Promise<void> {
     });
   } catch (err) {
     if (err instanceof UsageError) {
-      process.stderr.write(
-        `${err.message}\nUsage: pgdelta schema lint --dir <dir>\n`,
+      throw new UsageError(
+        `${err.message}\nUsage: pgdelta schema lint --dir <dir>`,
       );
-      process.exit(2);
     }
     throw err;
   }
@@ -794,6 +765,6 @@ export async function cmdSchemaLint(args: string[]): Promise<void> {
     );
   }
   if (report.blocking) {
-    process.exit(1);
+    throw new CliExit(1);
   }
 }

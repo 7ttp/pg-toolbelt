@@ -43,6 +43,43 @@ const SCHEMA_SQL = `
   CREATE INDEX items_name_idx ON clitest.items (name);
 `;
 
+describe("CLI: error → exit-code mapping (main is the sole exiter)", () => {
+  test("a post-parse usage error maps to exit 2 with its message on stderr", async () => {
+    // `--no-format` + `--format-options` is a post-parse guard in cmdSchemaExport
+    // that used to `process.stderr.write(...) + process.exit(2)`. It now throws
+    // UsageError, which main() maps to exit 2 while writing the message. The
+    // guard runs before any DB connection, so the bogus --source is never dialed.
+    const res = await runCli([
+      "schema",
+      "export",
+      "--source",
+      "postgres://unused.invalid:5432/nope",
+      "--out-dir",
+      join(tmpdir(), `pgdn-exitmap-${Date.now()}`),
+      "--no-format",
+      "--format-options",
+      "{}",
+    ]);
+    expect(res.exitCode).toBe(2);
+    expect(res.stderr).toMatch(/mutually exclusive/);
+  });
+
+  test("an unknown flag (parse-time usage error) maps to exit 2", async () => {
+    const res = await runCli([
+      "snapshot",
+      "--source",
+      "postgres://unused.invalid:5432/nope",
+      "--out",
+      join(tmpdir(), `pgdn-exitmap-${Date.now()}.json`),
+      "--totally-unknown-flag",
+    ]);
+    expect(res.exitCode).toBe(2);
+    expect(res.stderr).toMatch(/Unknown flag/);
+    // the command-specific usage hint still rides along on the same message
+    expect(res.stderr).toMatch(/Usage: pgdelta snapshot/);
+  });
+});
+
 describe("CLI: --help", () => {
   test("does not recommend apply --force for unsafe plans", async () => {
     const res = await runCli(["--help"]);

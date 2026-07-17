@@ -53,6 +53,8 @@ import {
   cmdSchemaApply,
   cmdSchemaLint,
 } from "./commands/schema.ts";
+import { CliExit, UsageError } from "./flags.ts";
+import { SchemaFrontendError } from "../frontends/index.ts";
 
 const USAGE = `
 pgdelta <command> [options]
@@ -228,6 +230,18 @@ async function main(): Promise<void> {
         process.exit(2);
     }
   } catch (error) {
+    // Command handlers never call process.exit themselves — main is the sole
+    // exiter. An operation-result exit arrives as CliExit (the command already
+    // wrote its own output); a usage/frontend error arrives as UsageError /
+    // SchemaFrontendError and maps to exit 2 with its message. Everything else
+    // is an unexpected failure → the generic "Error:" path + exit 1.
+    if (error instanceof CliExit) {
+      process.exit(error.code);
+    }
+    if (error instanceof UsageError || error instanceof SchemaFrontendError) {
+      process.stderr.write(`${error.message}\n`);
+      process.exit(2);
+    }
     process.stderr.write(
       `Error: ${error instanceof Error ? error.message : String(error)}\n`,
     );
