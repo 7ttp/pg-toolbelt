@@ -12,8 +12,9 @@ import { loadSqlFiles } from "../src/frontends/load-sql-files.ts";
 import { createTestDb } from "./containers.ts";
 
 const PG_MAJOR = Number(
-  /postgres:(\d+)/.exec(process.env["PGDELTA_TEST_IMAGE"] ?? "postgres:17-alpine")?.[1] ??
-    "17",
+  /postgres:(\d+)/.exec(
+    process.env["PGDELTA_TEST_IMAGE"] ?? "postgres:17-alpine",
+  )?.[1] ?? "17",
 );
 
 describe.skipIf(PG_MAJOR < 16)(
@@ -28,7 +29,9 @@ describe.skipIf(PG_MAJOR < 16)(
         await admin.pool.query(
           `CREATE ROLE ${roleName} LOGIN PASSWORD 'applier' CREATEROLE NOSUPERUSER INHERIT`,
         );
-        await admin.pool.query(`GRANT CREATE ON DATABASE ${admin.name} TO ${roleName}`);
+        await admin.pool.query(
+          `GRANT CREATE ON DATABASE ${admin.name} TO ${roleName}`,
+        );
         await admin.pool.query(`GRANT ALL ON SCHEMA public TO ${roleName}`);
         await admin.pool.query(`GRANT ${roleName} TO CURRENT_USER`);
 
@@ -48,10 +51,12 @@ create schema ${schemaRole} authorization ${schemaRole};`,
           applier,
           { mode: "isolatedCluster" },
         );
-        expect(result.factBase.has({ kind: "role", name: schemaRole })).toBe(true);
-        expect(
-          result.factBase.has({ kind: "schema", name: schemaRole }),
-        ).toBe(true);
+        expect(result.factBase.has({ kind: "role", name: schemaRole })).toBe(
+          true,
+        );
+        expect(result.factBase.has({ kind: "schema", name: schemaRole })).toBe(
+          true,
+        );
         // createrole_self_grant bootstrap membership must not leak into the
         // desired-state catalog (would plan GRANT … TO applier WITH ADMIN OPTION).
         expect(

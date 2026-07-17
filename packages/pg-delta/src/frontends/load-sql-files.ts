@@ -971,7 +971,12 @@ export async function loadSqlFiles(
     const edges = [...factBase.edges].filter(
       (e) => kept.has(encodeId(e.from)) && kept.has(encodeId(e.to)),
     );
-    factBase = buildFactBase(facts, edges, factBase.source, factBase.referenceOnly);
+    factBase = buildFactBase(
+      facts,
+      edges,
+      factBase.source,
+      factBase.referenceOnly,
+    );
   }
   return {
     factBase,
