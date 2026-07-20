@@ -357,8 +357,14 @@ export const typeRules: Record<string, KindRules> = {
     },
     drop: (fact) => {
       const id = fact.id as { schema: string; type: string; name: string };
+      // Destructive: DROP ATTRIBUTE … CASCADE nulls the stored value of that
+      // field across every row of every table whose column is of this
+      // composite. A collation-only attribute change routes through the
+      // attribute "replace" strategy (drop + recreate), which renders via THIS
+      // drop rule too, so this one flag covers that path as well.
       return {
         sql: `ALTER TYPE ${rel(id.schema, id.type)} DROP ATTRIBUTE ${qid(id.name)} CASCADE`,
+        dataLoss: "destructive",
       };
     },
     rename: (fact, to) => {

@@ -101,6 +101,78 @@ describe("stage 9: renames", () => {
     }
   }, 60_000);
 
+  test("renamed table stays under data-preservation coverage (F7)", async () => {
+    const dbs = await pair(
+      "ren_cover",
+      `CREATE SCHEMA app;
+       CREATE TABLE app.old_name (id integer NOT NULL, note text DEFAULT 'x');
+       INSERT INTO app.old_name VALUES (1, 'keep'), (2, 'stay');`,
+      `CREATE SCHEMA app;
+       CREATE TABLE app.new_name (id integer NOT NULL, note text DEFAULT 'x');`,
+    );
+    try {
+      const [s, d] = [
+        await extract(dbs.source.pool),
+        await extract(dbs.desired.pool),
+      ];
+      const thePlan = plan(s.factBase, d.factBase, { renames: "auto" });
+      const verdict = await provePlan(thePlan, dbs.source.pool, d.factBase);
+      expect(verdict.ok).toBe(true);
+      // the renamed table is CHECKED under its NEW name, not skipped as
+      // "dropped/recreated" — without the fix its old key lands in
+      // recreatedTables and it gets ZERO data-preservation coverage (F7).
+      const checked = verdict.coverage.perTable.find(
+        (p) => p.table.schema === "app" && p.table.name === "new_name",
+      );
+      expect(checked).toBeDefined();
+      expect(verdict.coverage.tablesSkipped).toEqual([]);
+    } finally {
+      await dbs.drop();
+    }
+  }, 60_000);
+
+  test("undeclared row loss on a renamed table is caught (F7)", async () => {
+    const dbs = await pair(
+      "ren_loss",
+      `CREATE SCHEMA app;
+       CREATE TABLE app.old_name (id integer DEFAULT 1);
+       INSERT INTO app.old_name SELECT generate_series(1, 5);`,
+      `CREATE SCHEMA app;
+       CREATE TABLE app.new_name (id integer DEFAULT 1);`,
+    );
+    try {
+      const [s, d] = [
+        await extract(dbs.source.pool),
+        await extract(dbs.desired.pool),
+      ];
+      const thePlan = plan(s.factBase, d.factBase, { renames: "auto" });
+      // inject a lie: after the rename, silently discard the rows but declare
+      // dataLoss:none. The proof must catch it now that the renamed table is
+      // covered (before the fix it was skipped as "dropped by the plan").
+      thePlan.actions.push({
+        sql: `TRUNCATE app.new_name`,
+        verb: "alter",
+        produces: [],
+        consumes: [{ kind: "table", schema: "app", name: "new_name" }],
+        destroys: [],
+        releases: [],
+        transactionality: "transactional",
+        lockClass: "accessExclusive",
+        newSegmentBefore: false,
+        dataLoss: "none",
+        rewriteRisk: false,
+      });
+      const verdict = await provePlan(thePlan, dbs.source.pool, d.factBase);
+      // row count dropped 5 → 0 under the NEW name — a data violation
+      expect(verdict.dataViolations).toEqual([
+        { table: { schema: "app", name: "new_name" }, before: 5, after: 0 },
+      ]);
+      expect(verdict.ok).toBe(false);
+    } finally {
+      await dbs.drop();
+    }
+  }, 60_000);
+
   test("renames: 'off' (the default) preserves drop+create", async () => {
     const dbs = await pair(
       "ren_off",

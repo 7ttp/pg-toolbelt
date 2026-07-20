@@ -116,6 +116,13 @@ export interface Plan {
   /** every rename candidate found, applied or not — "prompt" mode renders
    *  these as questions; near-misses explain why they degraded (§4.1) */
   renameCandidates: RenameCandidate[];
+  /** the renames this plan actually applied (as { from, to } stable-id pairs),
+   *  stamped only when non-empty so corpus / direct-library plan artifacts stay
+   *  byte-identical. The proof loop reads this to keep a renamed table under
+   *  data-preservation coverage: an accepted rename destroys the OLD subtree, so
+   *  without this stamp the old relKey looks "recreated" and the renamed table
+   *  is silently skipped (F7). */
+  acceptedRenames?: Array<{ from: StableId; to: StableId }>;
   actions: Action[];
   safetyReport: SafetyReport;
 }
@@ -524,6 +531,16 @@ export function plan(
       ? { redactSecrets: options.redactSecrets }
       : {}),
     renameCandidates,
+    // stamp accepted renames only when there are any, so corpus / direct-library
+    // plan artifacts stay byte-identical (F7).
+    ...(acceptedRenames.length > 0
+      ? {
+          acceptedRenames: acceptedRenames.map((r) => ({
+            from: r.from.id,
+            to: r.to.id,
+          })),
+        }
+      : {}),
     actions: finalActions,
     safetyReport,
   };

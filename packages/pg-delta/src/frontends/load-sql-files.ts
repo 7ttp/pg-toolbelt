@@ -27,8 +27,9 @@
  * memberships will load successfully. Use this mode when your SQL files
  * intentionally manage cluster-level state.
  */
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryResult } from "pg";
 import type { Diagnostic } from "../core/diagnostic.ts";
+import { qid } from "../plan/render.ts";
 import { buildFactBase, type FactBase } from "../core/fact.ts";
 import {
   extract,
@@ -466,6 +467,91 @@ function serializeMembership(m: MembershipTuple): string {
   return `${m.role}:${m.member}:${String(m.admin_option)}`;
 }
 
+/**
+ * Best-effort undo of any cluster-level role / membership side effect that
+ * committed before the load threw (databaseScratch ONLY). Because `applyFile`
+ * commits per file, a CREATE ROLE / GRANT — or DO-block dynamic SQL that evaded
+ * the static preflight — survives a load that later throws (non-convergence,
+ * body-validation, DML, or the on-success leak comparison itself). Compares the
+ * current cluster state against the pre-load snapshot and reverses the delta:
+ * drop created roles, revoke added memberships, re-grant removed memberships.
+ * `applyFile` ROLLBACKs on failure, so `client` is in a clean (non-aborted)
+ * transaction state when this runs. Each restore statement is best-effort; a
+ * failure is reported as a `scratch_leak_unrestored` diagnostic rather than
+ * masking the original error. Successful restores contribute nothing.
+ */
+async function restoreScratchClusterState(
+  client: PoolClient,
+  rolesBefore: QueryResult | null,
+  membershipsBefore: QueryResult<MembershipTuple> | null,
+): Promise<Diagnostic[]> {
+  const diags: Diagnostic[] = [];
+  const rolesNow = await client.query(
+    `SELECT rolname FROM pg_roles ORDER BY 1`,
+  );
+  const membershipsNow = await client.query<MembershipTuple>(`
+    SELECT r1.rolname AS role, r2.rolname AS member,
+           m.admin_option
+    FROM pg_auth_members m
+    JOIN pg_roles r1 ON r1.oid = m.roleid
+    JOIN pg_roles r2 ON r2.oid = m.member
+    ORDER BY 1, 2`);
+
+  const beforeRoleSet = new Set(
+    (rolesBefore?.rows ?? []).map((r) => (r as { rolname: string }).rolname),
+  );
+  const createdRoles = rolesNow.rows
+    .map((r) => (r as { rolname: string }).rolname)
+    .filter((r) => !beforeRoleSet.has(r));
+
+  const beforeMemberMap = new Map(
+    (membershipsBefore?.rows ?? []).map((m) => [serializeMembership(m), m]),
+  );
+  const nowMemberMap = new Map(
+    membershipsNow.rows.map((m) => [serializeMembership(m), m]),
+  );
+  const addedMemberships = [...nowMemberMap.entries()]
+    .filter(([k]) => !beforeMemberMap.has(k))
+    .map(([, m]) => m);
+  const removedMemberships = [...beforeMemberMap.entries()]
+    .filter(([k]) => !nowMemberMap.has(k))
+    .map(([, m]) => m);
+
+  const tryRestore = async (stmt: string, what: string): Promise<void> => {
+    try {
+      await client.query(stmt);
+    } catch (err) {
+      diags.push({
+        code: "scratch_leak_unrestored",
+        severity: "error",
+        message: `${what}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  };
+
+  // Revoke added memberships first (a created role may hold them), then drop
+  // created roles, then re-grant memberships the load removed.
+  for (const m of addedMemberships) {
+    await tryRestore(
+      `REVOKE ${qid(m.role)} FROM ${qid(m.member)}`,
+      `could not revoke leaked membership ${m.role} FROM ${m.member}`,
+    );
+  }
+  for (const role of createdRoles) {
+    await tryRestore(
+      `DROP ROLE IF EXISTS ${qid(role)}`,
+      `could not drop leaked role ${role}`,
+    );
+  }
+  for (const m of removedMemberships) {
+    await tryRestore(
+      `GRANT ${qid(m.role)} TO ${qid(m.member)}${m.admin_option ? " WITH ADMIN OPTION" : ""}`,
+      `could not restore revoked membership ${m.role} TO ${m.member}`,
+    );
+  }
+  return diags;
+}
+
 export async function loadSqlFiles(
   files: SqlFile[],
   shadow: Pool,
@@ -566,6 +652,33 @@ export async function loadSqlFiles(
       `declarative files must not manage transactions — ${txnControlDiags.length} file(s) contain transaction-control statements`,
       txnControlDiags,
     );
+  }
+
+  // cluster-DDL preflight (databaseScratch ONLY): role / membership DDL leaks
+  // into the shared cluster because each file commits (BEGIN/COMMIT in
+  // applyFile). Refuse it BEFORE executing anything so a committed CREATE ROLE
+  // / GRANT can never survive. This is a static (regex-masked) precheck; DO-block
+  // dynamic SQL that evades it is caught + reversed by the post-load snapshot
+  // comparison and the best-effort restore below. isolatedCluster mode manages
+  // cluster state legitimately and skips this preflight entirely.
+  if (mode === "databaseScratch") {
+    const clusterDdlDiags: Diagnostic[] = [];
+    for (const file of files) {
+      const offenders = findClusterDdlStatements(file.sql);
+      if (offenders.length > 0) {
+        clusterDdlDiags.push({
+          code: "cluster_ddl_in_scratch_mode",
+          severity: "error",
+          message: `${file.name}: declarative SQL must not contain cluster-level DDL in databaseScratch mode (found: ${[...new Set(offenders)].join(", ")}) — use an isolated-cluster shadow for shared objects`,
+        });
+      }
+    }
+    if (clusterDdlDiags.length > 0) {
+      throw new ShadowLoadError(
+        `declarative files contain cluster-level DDL not allowed in databaseScratch mode — ${clusterDdlDiags.length} file(s) affected; use an isolated-cluster shadow for shared objects`,
+        clusterDdlDiags,
+      );
+    }
   }
 
   // snapshot pg_roles + pg_auth_members before loading (databaseScratch only)
@@ -955,6 +1068,24 @@ export async function loadSqlFiles(
         })),
       );
     }
+  } catch (err) {
+    // Best-effort containment of any cluster-level leak that committed before the
+    // throw (databaseScratch only): per-file COMMIT means a CREATE ROLE / GRANT —
+    // or DO-block dynamic SQL that evaded the static preflight, detected by the
+    // on-success snapshot comparison above — survives an aborted load. Reverse it
+    // BEFORE the finally releases the pooled client. `applyFile` ROLLBACKs on
+    // failure, so `client` is in a clean transaction state here.
+    if (mode === "databaseScratch") {
+      const restoreDiags = await restoreScratchClusterState(
+        client,
+        rolesBefore,
+        membershipsBefore,
+      );
+      if (restoreDiags.length > 0 && err instanceof ShadowLoadError) {
+        err.details.push(...restoreDiags);
+      }
+    }
+    throw err;
   } finally {
     // restore the GUC even when load fails early (before the on-success reset
     // at the body-validation step) — otherwise the pooled client returns with

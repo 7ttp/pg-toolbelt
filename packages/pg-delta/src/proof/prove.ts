@@ -284,6 +284,11 @@ export function detectViolations(
   ctx: {
     recreatedTables: Set<string>;
     declaredRewriteTables: Set<string>;
+    /** oldRelKey → newRelKey for accepted table renames. The data lives under
+     *  the NEW key in `after`, so a renamed table is compared before(old) vs
+     *  after(new) instead of being skipped as "dropped/recreated" (F7). Empty /
+     *  absent ⇒ behavior is byte-identical to the non-rename path. */
+    renamedTables?: Map<string, string>;
   },
 ): {
   dataViolations: ProofVerdict["dataViolations"];
@@ -296,12 +301,17 @@ export function detectViolations(
   const tablesSkipped: ProofCoverage["tablesSkipped"] = [];
 
   for (const [table, beforeStat] of before) {
-    // `table` is the collision-free relKey the before/after maps are keyed by;
-    // the verdict carries the parsed { schema, name } so consumers never re-parse
-    // a JSON/dotted string (render with render.ts `rel()` for display).
-    const [schema, name] = parseRelKey(table);
+    // `table` is the collision-free relKey the before/after maps are keyed by.
+    // For an accepted rename the data now lives under the NEW key in `after`, so
+    // resolve the after-side key through the rename map (identity otherwise).
+    const afterKey = ctx.renamedTables?.get(table) ?? table;
+    // The verdict carries the parsed { schema, name } so consumers never re-parse
+    // a JSON/dotted string (render with render.ts `rel()` for display). Use the
+    // AFTER key: for a rename that is the NEW name (where the data lives now);
+    // for every other table afterKey === table, so this is unchanged.
+    const [schema, name] = parseRelKey(afterKey);
     const ref: TableRef = { schema, name };
-    const afterStat = after.get(table);
+    const afterStat = after.get(afterKey);
     if (afterStat === undefined) {
       tablesSkipped.push({ table: ref, reason: "dropped by the plan" });
       continue;
@@ -391,6 +401,24 @@ export async function provePlan(
     }
   }
 
+  // Accepted table renames: the rename action destroys the OLD subtree (so the
+  // old relKey landed in `recreatedTables` above), but the table is KEPT — its
+  // data just moved to the NEW name. Map old→new for the proof and un-mark the
+  // old key as recreated, so the renamed table is compared before(old) vs
+  // after(new) instead of being silently skipped (F7).
+  const renamedTables = new Map<string, string>();
+  for (const r of thePlan.acceptedRenames ?? []) {
+    if (
+      (r.from.kind === "table" || r.from.kind === "materializedView") &&
+      (r.to.kind === "table" || r.to.kind === "materializedView")
+    ) {
+      const from = tableRelationOf(r.from);
+      const to = tableRelationOf(r.to);
+      if (from !== undefined && to !== undefined) renamedTables.set(from, to);
+    }
+  }
+  for (const from of renamedTables.keys()) recreatedTables.delete(from);
+
   if (options.autoSeed) {
     const present = await tableStats(clonePool);
     const empty = [...present]
@@ -478,7 +506,7 @@ export async function provePlan(
   const { dataViolations, rewriteViolations, coverage } = detectViolations(
     before,
     after,
-    { recreatedTables, declaredRewriteTables },
+    { recreatedTables, declaredRewriteTables, renamedTables },
   );
 
   return {
