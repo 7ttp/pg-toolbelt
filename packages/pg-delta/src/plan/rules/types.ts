@@ -241,6 +241,51 @@ export const typeRules: Record<string, KindRules> = {
           // every column of this type through a text cast, drop the old type.
           // rebuildsDependents has already forced views/defaults/routines
           // that reference the type out of the way.
+          const enumKey = encodeId(fact.id);
+          // GUARD (non-column dependents): the rebuild migrates only COLUMN
+          // dependents. A DOMAIN over the enum, a COMPOSITE type with an
+          // attribute of the enum, or a RANGE over the enum is NOT a rebuildable
+          // kind, so a SURVIVING one stays bound to the renamed old type and the
+          // final DROP TYPE fails at apply ("cannot drop type … other objects
+          // depend on it"). Fail loud at plan time — mirrors the in-use domain /
+          // range / composite ALTER ATTRIBUTE guards. Only dependents present on
+          // BOTH sides (view = desired, sourceView = target DB) can hit this;
+          // one this plan drops or creates is not a blocker. Full migration of
+          // non-column dependents is tracked separately.
+          const seenDependents = new Set<string>();
+          const nonColumnDependents = view.edges
+            .filter(
+              (e) =>
+                encodeId(e.to) === enumKey &&
+                (e.from.kind === "domain" || e.from.kind === "type") &&
+                encodeId(e.from) !== enumKey &&
+                view.get(e.from) !== undefined &&
+                sourceView.get(e.from) !== undefined,
+            )
+            .map((e) => e.from)
+            .filter((depId) => {
+              const key = encodeId(depId);
+              if (seenDependents.has(key)) return false;
+              seenDependents.add(key);
+              return true;
+            })
+            .sort((a, b) => (encodeId(a) < encodeId(b) ? -1 : 1));
+          if (nonColumnDependents.length > 0) {
+            const deps = nonColumnDependents
+              .map((depId) => {
+                const d = depId as {
+                  kind: string;
+                  schema: string;
+                  name: string;
+                };
+                const keyword = d.kind === "domain" ? "DOMAIN" : "TYPE";
+                return `${keyword} ${rel(d.schema, d.name)}`;
+              })
+              .join(", ");
+            throw new Error(
+              `enum ${relName}: cannot remove or reorder values while non-column object(s) depend on it — ${deps}. The rebuild drops the old enum, which those objects still reference, and PostgreSQL forbids dropping a type in use. Migrating a DOMAIN / COMPOSITE / RANGE that uses an enum across a value-set change is not supported yet; drop the dependent object(s), or recreate them, first.`,
+            );
+          }
           // a deterministic temp name that cannot collide with an existing
           // type in the schema (bump a counter past any occupant)
           const taken = (n: string): boolean =>
@@ -257,7 +302,6 @@ export const typeRules: Record<string, KindRules> = {
           let tmp = `${id.name}__pgdelta_replaced`;
           for (let n = 2; taken(tmp); n++)
             tmp = `${id.name}__pgdelta_replaced_${n}`;
-          const enumKey = encodeId(fact.id);
           const specs: ActionSpec[] = [
             { sql: `ALTER TYPE ${relName} RENAME TO ${qid(tmp)}` },
             {

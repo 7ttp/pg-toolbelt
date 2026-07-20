@@ -40,11 +40,27 @@ describe("public API surface", () => {
       exports: Record<string, { bun: string; import: string; types: string }>;
     };
     // Dual conditional export: the `bun` condition serves TS source directly,
-    // while `import`/`require`/`default` serve the compiled dist for Node.
+    // while `import`/`default` serve the compiled dist for Node.
     const entry = pkg.exports["./integrations"];
     expect(entry).toBeDefined();
     expect(entry?.bun).toBe("./src/integrations/index.ts");
     expect(entry?.import).toBe("./dist/integrations/index.js");
     expect(entry?.types).toBe("./dist/integrations/index.d.ts");
+  });
+
+  // The build is ESM-only (package `type: module`, NodeNext output). A `require`
+  // condition that points at an ESM `.js` is a lie: a CJS consumer that matches
+  // it gets `ERR_REQUIRE_ESM` on Node <22. We advertise no CJS entry at all, so
+  // ESM-aware tooling resolves via `import`/`default` and CJS consumers must use
+  // dynamic import (or Node >=22, which can `require()` ESM synchronously).
+  test("no export entry advertises a `require` condition (ESM-only package)", () => {
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+      exports: Record<string, Record<string, string>>;
+    };
+    const offenders = Object.entries(pkg.exports)
+      .filter(([, conditions]) => "require" in conditions)
+      .map(([subpath]) => subpath);
+    expect(offenders).toEqual([]);
   });
 });
