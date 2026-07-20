@@ -1,6 +1,6 @@
 # I1 — Pre-diff rename identity normalization
 
-**Priority:** Highest strategic · **Wave:** 2 · **Ship:** one PR · **Depends on:** V1 merged · **Conflicts with:** C1, H1, anyone on carry/emitter
+**Priority:** Highest strategic · **Wave:** 2 · **Ship:** one PR · **Depends on:** V1 merged; C1 dual-prove preferred first (corpus gate then covers both compact modes) · **Conflicts with:** C1, H1, anyone on carry/emitter
 
 ## Goal
 
@@ -36,10 +36,10 @@ Target end state:
 | Area | Paths |
 |---|---|
 | New normalizer | Prefer `plan/identity-normalize.ts` (or `core/` if pure + reusable) |
-| Rename emission | Same module or `plan/phases/change-set.ts` — see **Design decisions** |
+| Rename emission | **Existing seam** in `plan/phases/action-emitter.ts` (~lines 180–194) — keep it; see **Design decisions §2** |
 | Integration point | After managed view reconstruction, **before** `diff()` — `plan/phases/change-set.ts` |
 | Shrink/remove | `plan/role-rename-carry.ts`, call sites in `change-set.ts` / `plan/phases/action-emitter.ts` |
-| Proof simplify | `proof/prove.ts` rename-aware table mapping — should get simpler once ids align |
+| Proof | **No changes expected** — `prove.ts` `renamedTables` is table/matview rename machinery (role renames are filtered out, ~prove.ts:411–414); out of scope, P2 owns `prove.ts` |
 | Tests | normalize unit tests; `tests/role-rename-column-grant-carry.test.ts`; `tests/renames.test.ts`; corpus rename scenarios |
 
 ## Read-only references
@@ -67,22 +67,31 @@ Rationale: rename actions must sort **before** dependent DDL so subsequent
 statements render against post-rename names. Canonicalizing to old names would
 force the rest of the plan to speak pre-rename identifiers.
 
-### 2. Rename actions are injected outside generic diff
+### 2. Rename emission already exists — keep the seam, do not rebuild it
 
-After normalization, diff sees **continuity** for carried refs — it will **not**
-emit `ALTER … RENAME`. That is correct for ACL/membership/owner churn; it is
-incorrect for the rename itself.
+Rename actions are **already synthesized outside generic diff**: the action
+emitter iterates `acceptedRenames` and invokes each kind’s `rename` rule
+(`plan/phases/action-emitter.ts` ~lines 180–194), emitting the action with
+`produces` = new subtree / `destroys` = old subtree. Diff never emits renames
+today, and `role-rename-carry.ts` only cancels churn — it never emits the
+rename itself. **Do not build a second emission path.**
 
-Therefore the planner must **inject one rename action per accepted rename**
-from the rename proposal map, independent of diff. This is an intentional,
-narrow “second planner” seam — far smaller than carry cancellation — and it
-must live in **one** place (normalize module or change-set), documented as:
+What normalization changes *around* that existing seam:
+
+- **Capture `acceptedRenames` before the id rewrite.** The rename rule renders
+  from the original `from` fact (`ALTER ROLE old RENAME TO new`); the emitter
+  must keep receiving pre-rewrite from-facts, not normalized ones.
+- **Ordering pin:** post-normalization, dependent facts reference **new**-name
+  ids, so the existing `produces` = new-subtree edge is what sorts the rename
+  before its dependents. Add a regression test for that ordering — today it
+  also leans on old ids existing on the source side.
 
 ```text
-acceptedRenames → inject rename Actions
-                → rewrite both FBs to desired names
-                → diff(normalizedSource, normalizedDesired)
-                → emit remaining actions (no carry canceler)
+propose + accept renames (original from-facts captured)
+  → rewrite both FBs to desired names
+  → diff(normalizedSource, normalizedDesired)      # sees continuity; no churn
+  → action emitter synthesizes rename actions from acceptedRenames (existing code)
+  → emit remaining actions (no carry canceler)
 ```
 
 Do **not** reintroduce post-diff remove/add cancellation to “find” renames.
@@ -143,7 +152,8 @@ PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts  # required
 ## Acceptance criteria
 
 - [ ] Canonical direction = desired names (documented in code)
-- [ ] Rename actions injected from accepted renames; not recovered via carry
+- [ ] Rename emission stays in the existing action-emitter seam, fed
+      pre-rewrite from-facts; not recovered via carry; ordering pinned by test
 - [ ] Role-name relabel churn absent from post-normalize diff
 - [ ] Column ACL + role rename regression green
 - [ ] Corpus green on at least PG 17 full run

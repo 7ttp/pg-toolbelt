@@ -1,6 +1,13 @@
 # C1 — Prove compaction is not required for convergence
 
-**Priority:** Medium · **Wave:** 4 · **Ship:** one PR · **Depends on:** I1 preferred (avoid rename+compact fights) · **Conflicts with:** V1, I1, C2, H1
+**Priority:** Medium–High · **Wave:** 3 (any time after V1) · **Ship:** one PR · **Depends on:** V1 preferred (prove.ts touch-points) · **Coordinate with:** P1/P3 on `tests/engine.test.ts` · **Conflicts with:** C2, H1 (`internal.ts`); V1/P2 only if `prove.ts` API is touched
+
+> **Scheduling note:** the old “after I1” dependency was inherited from the
+> defaults-flipping design, which edited `plan.ts`/`prove.ts` gates. Dual-prove
+> is harness-only, so it can — and preferably should — land **before I1**: I1’s
+> mandatory full-corpus gate then validates rename scenarios under both compact
+> modes, catching rename×compaction interactions when they are most likely to
+> be introduced. Cost: I1’s corpus run goes from ~2.5 to ~5 min. Worth it.
 
 ## Goal
 

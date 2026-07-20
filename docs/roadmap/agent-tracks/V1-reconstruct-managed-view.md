@@ -108,8 +108,7 @@ do not change their semantics by accident.
 - [ ] Guard prevents reintroduction of open-coded `resolveView`+scope composition
 - [ ] No intentional behavior change; existing view/scope tests still pass
 - [ ] Short note in `managed-view-architecture.md` pointing at the helper
-- [ ] Changeset (`patch`) if any public API export surface changes; otherwise
-      `patch` still appropriate if library callers are expected to use the helper
+- [ ] Changeset: `patch` (new exported helper on the public surface)
 
 ## Conflicts / do not touch
 
