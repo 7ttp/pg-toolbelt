@@ -2,6 +2,10 @@
 
 **Priority:** High (trust tax) · **Wave:** 0 · **Ship:** alone · **Parallel with:** anything
 
+> **Contract:** re-measured three-budget size story (engine slice / product
+> surface / package total), dated; precise sql-format boundary wording
+> (subpaths avoid it; root loads it transitively).
+
 ## Goal
 
 Stop marketing an obsolete size story. Reviewers and agents currently optimize
@@ -53,9 +57,13 @@ diff-path claim.
 
    Include the sql-format wording absorbed from retired
    [K1](K1-sql-format-boundary.md): state that “engine LOC” excludes
-   `frontends/sql-format` (~3.8k), and note the boundary is already physical —
-   `./sql-format` is a package subpath export (`package.json:78-83`) that the
-   root index does not re-export, so core embedders never load the formatter.
+   `frontends/sql-format` (~3.8k). Be precise about the boundary:
+   `./sql-format` is a package subpath export (`package.json:78-83`) and the
+   root index re-exports no sql-format **symbols** — but the root **does**
+   transitively load the formatter (`index.ts:70-72` exports `exportSqlFiles`,
+   which imports `formatSqlStatements`, `export-sql-files.ts:22`). Only
+   focused-subpath consumers (`/core`, `/plan`, …) reliably avoid loading it.
+   Do not claim root consumers “never load the formatter.”
 3. Where “79% smaller / ~11.5k” appears as historical rewrite result, either:
    - keep it clearly labeled as **rewrite-era snapshot**, or
    - replace with current numbers and move the historical claim to build-log.

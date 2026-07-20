@@ -1,6 +1,9 @@
 # H1 — Planner-body kind-switch lint
 
-**Priority:** Low–Medium · **Wave:** 5 · **Ship:** alone · **Depends on:** C1 (prefer after C2) · **Parallel with:** H2 if H1 is lint-only · **Conflicts with:** I1, C1, C2 while those edit `internal.ts`
+**Priority:** Low–Medium · **Wave:** 5 · **Ship:** alone · **Depends on:** C1 (prefer after C2) · **Conflicts with:** I1, C1, C2 while those edit `internal.ts`
+
+> **Contract:** per-file kind-check **count ratchet** (baseline table, fails
+> on growth, shrinks by baseline update); `plan/rules/**` exempt by design.
 
 ## Goal
 
@@ -53,7 +56,7 @@ lands as another late pass.
 - [ ] Guard runs in `bun test src/`
 - [ ] Allowlist documented
 - [ ] No unrelated refactors
-- [ ] Changeset usually unnecessary (`test` only)
+- [ ] Changeset: none (tests only)
 
 ## Done when
 

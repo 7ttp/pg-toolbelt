@@ -2,11 +2,16 @@
 
 **Priority:** Medium–Low · **Wave:** 4 (after C1) · **Ship:** alone · **Depends on:** C1 (dual-prove safety net) · **Conflicts with:** H1 (same `internal.ts`)
 
+> **Contract:** evidence-gated (a dual-prove divergence or an implicated bug).
+> Per-fact suppressions may become rules; cross-action folding stays
+> pretty-only — it cannot be a per-kind rule.
+
 ## Goal
 
-After compaction is off the correctness default, **delete or move** elisions that
-encode ADP/default-ACL/create-as-applier semantics into the rule table (or leave
-them only on the pretty path with explicit tests).
+With C1's dual-prove enforcing that compaction is never *required* for
+convergence (C1 does **not** flip any default), **delete or move** elisions
+that encode ADP/default-ACL/create-as-applier semantics into the rule table
+(or leave them only on the pretty path with explicit tests).
 
 ## Why this track exists
 
@@ -55,7 +60,8 @@ lists on a minimal fact fixture (TDD).
 - [ ] No elision that ignores payload refs the way
       `elideCascadeSubsumedPolicyDrops` historically could
 - [ ] Pretty path still useful for common ACL noise
-- [ ] Changeset `refactor` or `fix` if behavior of `--compact` changes
+- [ ] Changeset: `patch` if `--compact` output changes; none for pure
+      internal moves
 
 ## Done when
 

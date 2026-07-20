@@ -9,8 +9,10 @@ Fact-check against the package showed the boundary **already exists**:
 - `packages/pg-delta/package.json:78-83` exports `./sql-format` (and
   `./extract`, `./plan`, `./apply`, `./proof`, `./core`, `./policy`, …) as
   subpaths.
-- The root package (`src/index.ts`) does **not** re-export sql-format — core
-  embedders never pull in the formatter.
+- The root package (`src/index.ts`) re-exports no sql-format **symbols** —
+  though it does load the formatter transitively via `exportSqlFiles`
+  (`index.ts:70-72` → `export-sql-files.ts:22`); only focused subpaths
+  (`/core`, `/plan`, …) avoid it. D0 owns stating this precisely.
 
 Tier B (package/subpath boundary) is therefore done, and Tier A (docs wording:
 “engine LOC excludes sql-format”, import guidance for embedders) is a

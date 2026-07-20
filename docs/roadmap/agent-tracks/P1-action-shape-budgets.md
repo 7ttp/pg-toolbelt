@@ -2,6 +2,11 @@
 
 **Priority:** High (proof quality) · **Wave:** 3 · **Ship:** alone · **Depends on:** V1 preferred · **Serialize with:** P2 if both edit `prove.ts`
 
+> **Contract:** opt-in per-scenario, **per-direction** semantic budgets,
+> evaluated against the **uncompacted** plan artifact, speaking the derived
+> vocabulary (replacement/rename predicates over `create|alter|drop` actions) —
+> never raw counts as primary.
+
 ## Goal
 
 Make the corpus catch **convergent but catastrophic** plans (e.g. DROP+CREATE
@@ -45,10 +50,26 @@ can own prove API changes.
    tables/columns, views/policies rebuild storms, extension drops).
 3. Budget dimensions — **lead with semantic assertions** (stable, express intent):
    - forbid `drop`/`create` of kind K when alter is expected
-   - forbid `replace` when `alter` expected (or require specific action kinds)
+   - forbid *replacement* of kind K when `alter` expected (see vocabulary below)
    - **Avoid** raw `max actions total` as a primary budget — it rots into
      snapshot-churn on every unrelated planner improvement. Use counts only as
      a last resort for a known pathological storm, with a comment explaining why.
+
+   **Action vocabulary (pinned — the raw plan cannot express these directly).**
+   `Action.verb` is only `"create" | "alter" | "drop"` (`plan.ts:36-60`) —
+   there is **no `replace` verb**, no subject field (actions carry
+   `produces`/`destroys` StableId sets), and renames emit as `alter`. The
+   budget helper must therefore define derived predicates over the action
+   list: **replacement(K)** = a `drop` and a `create` whose `destroys`/
+   `produces` contain the same-kind (and same-name-path) StableId;
+   **rename(K)** = an `alter` whose `produces` and `destroys` are both
+   non-empty subtrees. Document the derivation in the helper — budget fixtures
+   speak this derived vocabulary, never raw verbs.
+
+   **Budgets evaluate the uncompacted plan form, pinned.** Compaction folds
+   revoke/grant pairs and elides actions, which distorts shape assertions;
+   with C1's dual-prove both artifacts exist, so assert against
+   `compact: false` output.
 4. Failure message must show **actual vs budget** and scenario name.
 5. Document fixture schema in `corpus/README` or `tests/README` if one exists;
    otherwise a short section in this track’s PR description + comment on helper.
@@ -76,7 +97,7 @@ can own prove API changes.
 - [ ] Engine harness enforces budgets when present
 - [ ] ≥3 live scenarios with passing budgets
 - [ ] ≥1 documented known-bad shape (skip or issue link) if no planner fix in-PR
-- [ ] Changeset: `test` or `feat` if public prove helpers exported
+- [ ] Changeset: none if tests-only; `minor` if public prove helpers exported
 
 ## Conflicts
 

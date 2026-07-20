@@ -1,6 +1,10 @@
 # P3 — autoSeed on by default in CI corpus
 
-**Priority:** Medium · **Wave:** 3 · **Ship:** alone (tiny) · **Parallel with:** P1 (if P1 avoids prove defaults), D0, K1, V1 · **Depends on:** nothing (V1 not required)
+**Priority:** Medium · **Wave:** 3 · **Ship:** alone (tiny) · **Parallel with:** P1 (if P1 avoids prove defaults), D0, V1 · **Depends on:** nothing (V1 not required)
+
+> **Contract:** first make seeding observable (per-table outcome, SQLSTATE
+> taxonomy, no empty catch), then enable autoSeed at the harness level with a
+> keyed skip-allowlist and strict-on-unknown; library default unchanged.
 
 ## Goal
 
@@ -45,6 +49,15 @@ stronger path.
    in the corpus: a table ending at `"none"` must carry an allowlisted reason;
    an unexpected failure class fails the scenario (or reports loudly under a
    non-strict default — pick one and document it).
+5. **Pinned taxonomy — do not improvise.** `skipped` vs `failed` is decided by
+   **SQLSTATE class**, not string matching: expected-unseedable states
+   (`23502` not-null without default, `23503` FK, `23514` check, and the
+   generated/identity-column errors) → `skipped(reason=SQLSTATE)`; everything
+   else (connection errors, syntax, permission, unknown states) →
+   `failed(error)`. The skip-allowlist is keyed by
+   `{ scenario, direction, table, reasonCode }` — no bare table names. Strict
+   behavior: any `failed` outcome, or a `skipped` with a non-allowlisted key,
+   fails the scenario.
 
 ## RED → GREEN
 
@@ -64,9 +77,9 @@ stronger path.
 - [ ] Coverage contract enforced: `contentMode: "none"` only with an
       allowlisted reason; unexpected failure classes are loud
 - [ ] Library default for ad-hoc `provePlan` unchanged (or documented if changed)
-- [ ] Skip list (if any) documented
-- [ ] Changeset: `fix` (seed-outcome reporting is a behavior change) + the
-      harness/CI part
+- [ ] Skip list (if any) documented, keyed per the pinned taxonomy
+- [ ] Changeset: `patch` (seed-outcome reporting in the prove result); the
+      harness/CI part needs none
 
 ## Conflicts
 

@@ -2,6 +2,10 @@
 
 **Priority:** Highest · **Wave:** 1 · **Ship:** one PR, one agent · **Blocks:** I1; prefer before P2/C1
 
+> **Contract:** one **internal** helper seals `resolveView` →
+> `projectManagementScope` for the four full call sites; pin is byte-identical
+> output vs today (not raw-FB identity); guard is import/call-based per module.
+
 ## Goal
 
 Replace the duplicated `resolveView` → `projectManagementScope` composition with
@@ -88,11 +92,13 @@ do not change their semantics by accident.
    (`policy/policy.ts:838-850`; early return at `:887`). Do not write a test
    asserting raw-FB identity in the general case — it is false.
 4. Call sites pass the same knobs they pass today — behavior-preserving refactor.
-5. Add a unit/guard test:
-   - Prefer: `reconstruct.guard.test.ts` that fails if
-     `projectManagementScope(resolveView(` appears outside the helper module
-     (the four required call sites).
-   - Bare `resolveView(` without scope may remain in diff/seed paths.
+5. Add a unit/guard test — **guard on imports/calls per module, not a literal
+   nested-call grep**. `schema-export.ts` composes via an intermediate variable
+   (`resolveView` at ~:78, `projectManagementScope` at ~:122), so grepping for
+   `projectManagementScope(resolveView(` passes today while the duplication
+   stands. Instead: fail if any module outside the helper imports (or calls)
+   **both** `resolveView` and `projectManagementScope`. Bare `resolveView`
+   alone may remain in diff/seed paths.
 
 ## RED → GREEN
 
@@ -113,7 +119,8 @@ do not change their semantics by accident.
 
 ## Acceptance criteria
 
-- [ ] One exported reconstruction API; all plan/prove/apply/export paths use it
+- [ ] One **internal** reconstruction helper (not on the package index); all
+      four plan/prove/apply/export call sites use it
 - [ ] Guard prevents reintroduction of open-coded `resolveView`+scope composition
 - [ ] No intentional behavior change; existing view/scope tests still pass
 - [ ] Short note in `managed-view-architecture.md` pointing at the helper

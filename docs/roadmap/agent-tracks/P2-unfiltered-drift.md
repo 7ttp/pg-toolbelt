@@ -1,6 +1,16 @@
 # P2 — Attributed projection audit
 
-**Priority:** Medium–High · **Wave:** 3 · **Ship:** alone · **Depends on:** V1 · **Serialize with:** P1 on `prove.ts`
+**Priority:** Medium–High · **Wave:** 3 · **Ship:** **two PRs** — P2a
+(attribution plumbing in `policy/`, the heavy half) then P2b (prove/CLI
+surfacing, thin) · **Depends on:** V1 (attribution flows through the sealed
+helper) · **Serialize with:** P1 on `prove.ts`; P3's `autoSeedEmptyTables`
+touch
+
+> **Contract:** attribution over **suppressed deltas/state** (not dropped
+> facts), with stable reason codes, descendant attribution, the full stage
+> enum (incl. `managedBy`, reference-only), acknowledged/suspicious defaults
+> per stage — computed at **plan time**, attached to the plan artifact. P2a =
+> plumbing in `policy/`, P2b = prove/CLI surfacing.
 
 ## Goal
 
@@ -50,17 +60,32 @@ second drift diff is perpetually noisy**:
 
 The signal must carry **attribution**:
 
+**The unit of attribution is the suppressed delta/state, not the dropped
+fact.** Projection does more than drop facts: it keeps facts as
+**reference-only** while suppressing their payload and edge deltas
+(`core/diff.ts:32`), it prunes **edges** independently of their endpoint
+facts, and it hard-projects **`managedBy` provenance** unconditionally
+(`policy/policy.ts:850`). An audit that only tracks “excluded facts” is blind
+to all three.
+
 | Piece | Definition |
 |---|---|
 | **Managed drift** | Today’s prove compare, after `reconstructManagedView` — unchanged. |
-| **Exclusion record** | For each fact dropped between the post-extract catalog and the final managed view: `{ factId, stage, rule/reason }`, where stage ∈ baseline · policy scope rule · capability · management scope · reference-only projection. |
-| **Audit entry** | Exclusion record joined with “does this fact differ between source and desired?” — only differing excluded facts are reported. |
-| **Classification** | **acknowledged** — excluded by a rule that names it (profile baseline, explicit platform-schema rule); **suspicious** — a user-namespace fact swept out by a generic/wildcard rule or scope projection. The classification rubric must be data (per-rule flag), not a hardcoded schema list. |
+| **Suppression record** | For each delta/state the projection suppressed relative to the pre-projection catalog: `{ subject (factId or edge), stage, reasonCode, viaDescendantOf? }`. Stage enum (complete): baseline · policy scope rule · capability · management scope · reference-only projection · **managedBy provenance**. Reason codes are **stable identifiers** (data, not prose) so tooling can allowlist them. Facts pruned as descendants of an excluded root carry `viaDescendantOf: rootId` — attribution points at the decision, not the collateral. |
+| **Audit entry** | Suppression record joined with “does this subject differ between source and desired?” — only differing suppressed subjects are reported. |
+| **Classification** | **acknowledged** — suppressed by a rule that names it (profile baseline, explicit platform-schema rule, managedBy); **suspicious** — a user-namespace subject swept out by a generic/wildcard rule or scope projection. Every stage declares its **default** classification; per-rule flags override. The rubric is data, not a hardcoded schema list. |
+
+**Where the audit runs: plan time, pinned.** `provePlan` takes a finished
+`Plan` and has no raw pre-projection source FactBase (`prove.ts:379-384`), so
+the audit is computed during planning — where both raw fact bases are in
+hand — and attached to the plan artifact; prove/CLI only surface it. Do not
+add a pre-apply extraction to prove for this.
 
 This requires `resolveView` / `projectManagementScope` (via V1’s helper) to
-**emit exclusion attribution** — an additive optional output, off the hot path
-when not requested. That is the core engineering of this track; the prove/CLI
-surfacing is thin on top.
+**emit suppression attribution** — an additive optional output, off the hot
+path when not requested. That is **P2a**, the core engineering of this track
+(it touches the projection path V1 just sealed — attribution must flow through
+the helper, not around it). **P2b** is the prove-result/CLI surfacing on top.
 
 ## Design requirements
 
@@ -97,8 +122,11 @@ surfacing is thin on top.
 - [ ] Audit model matches the table above (or PR documents a justified amendment)
 - [ ] Managed path uses sealed reconstruct helper (V1); attribution flows
       through it, not around it
-- [ ] Tests cover suspicious vs acknowledged vs clean
-- [ ] Changeset `feat`
+- [ ] Tests cover suspicious vs acknowledged vs clean, including a
+      reference-only payload-suppression case and a descendant-attribution case
+- [ ] Audit computed at plan time and attached to the plan artifact; prove/CLI
+      only surface it
+- [ ] Changeset: `minor` (new plan-artifact/prove-result surface)
 - [ ] No corpus mass-failure (opt-in strictness, suspicious-only)
 
 ## Conflicts

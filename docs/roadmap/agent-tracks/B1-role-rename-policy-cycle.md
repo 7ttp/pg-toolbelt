@@ -4,6 +4,10 @@
 **Ship:** one PR, one agent · **Blocks:** I1 (normalization later subsumes this fix) ·
 **Conflicts with:** I1, anyone on `internal.ts` ordering or `rules/policies.ts`
 
+> **Contract:** focused `renames: "auto"` RED first (corpus can't express
+> renames); fix = release-edge carve-out restricted to accepted role old→new
+> pairs, with an over-skip negative test; I1b deletes the carve-out.
+
 ## Bug
 
 An accepted role rename plus an RLS policy whose `roles` payload references the
@@ -39,20 +43,29 @@ drop+create, not rename). That is why nothing caught this.
 
 ## RED first (TDD, mandatory)
 
-1. Corpus scenario `corpus/role-rename--policy-roles/{a,b}.sql`: role + table +
-   policy `TO` that role; role renamed in `b` (structurally identical role so
-   rename matching proposes it). Confirm it fails with the cycle error today.
-   If the corpus harness's rename-acceptance setting cannot express this,
-   fall back to a focused integration test **plus** the in-memory unit repro
-   (model on `src/plan/role-rename-carry.test.ts`).
+**The corpus cannot express this bug today**: the harness plans with no
+`renames` option (`tests/engine.test.ts:50`), which defaults to `"off"`
+(`plan.ts:154-155`) — rename acceptance is never active in the proof loop.
+Therefore:
+
+1. **Primary RED:** a focused test with `renames: "auto"` — the in-memory unit
+   repro (model on `src/plan/role-rename-carry.test.ts`: role + table + policy
+   `TO` that role, renamed on the desired side) plus an integration test that
+   plans/proves it end-to-end. Confirm the cycle error verbatim.
 2. Capture the failure output for the fix commit message.
+3. A corpus scenario for this class lands only once corpus scenarios can opt
+   into rename acceptance — that work item is owned by I1b (see I1). Do not
+   block B1 on it.
 
 ## Fix options (pick one, justify in PR)
 
 1. **Preferred:** rename-aware carve-out in `internal.ts` — when a
    releases-target's destroyer is a rename action that also **produces** the
    corresponding renamed id, skip the release-before-destroy edge (mirrors the
-   owner-edge carve-out).
+   owner-edge carve-out). **Restrict it to accepted role old→new pairs
+   specifically** — do not skip release-before-destroy edges generally — and
+   add a **negative over-skip test**: a policy releasing a role that is
+   genuinely dropped (not renamed) must still be ordered before the drop.
 2. Make `rules/policies.ts` `roles.alter` rename-aware (consult accepted
    renames; don't consume/release ids carried by a rename).
 3. Extend carry/relabel to payload role refs — **least preferred**: it grows
@@ -65,9 +78,11 @@ dead-but-harmless and is removed with carry.
 ## Acceptance criteria
 
 - [ ] RED repro captured, then green after fix
-- [ ] Corpus (or integration) scenario committed so this class stays covered
-- [ ] Full corpus green on `postgres:17-alpine`
-- [ ] Changeset `fix`
+- [ ] Focused unit + integration tests committed (`renames: "auto"`) so this
+      class stays covered; over-skip negative test included
+- [ ] Full corpus green on `postgres:17-alpine` (regression safety — the
+      corpus itself cannot exercise renames yet)
+- [ ] Changeset: `patch`
 - [ ] Note added to I1 that normalization subsumes this carve-out
 
 ## Done when

@@ -2,6 +2,13 @@
 
 **Priority:** Highest strategic · **Wave:** 2 · **Ship:** **two PRs** — I1a (pure normalizer, no pipeline change) then I1b (pipeline integration + carry deletion) · **Depends on:** V1 merged; **B1 merged** (cycle fix + scenario become I1's pin); C1 dual-prove preferred first (corpus gate then covers both compact modes) · **Conflicts with:** B1, C1, H1, anyone on carry/emitter
 
+> **Contract:** role renames only, normalized pre-diff into **desired**-name
+> space (ids + edges + payload role refs). Pipeline: discovery diff → filter →
+> propose from kept → normalize → canonical diff → filter → plan. Only
+> `source.fingerprint` uses the physical (un-rewritten) view; rename emission
+> stays in the existing action-emitter seam; carry (and B1's carve-out) deleted;
+> I1b adds the corpus `renames` opt-in.
+
 ## Goal
 
 Treat accepted renames (especially **role renames**) as a **rewriting of both
@@ -88,20 +95,36 @@ What normalization changes *around* that existing seam:
 
 ```text
 discovery diff(source, desired)                    # EXISTING: proposals need its
-  → propose + accept renames                       # remove/add pairs — renames.ts:48
-    (original from-facts captured)                 # takes diff deltas, not raw FBs
-  → record physical fingerprint (see §6) BEFORE any rewrite
+  → filterDeltas(allDeltas, policy, …)             # EXISTING: policy keeps/filters
+  → propose + accept renames from KEPT deltas      # remove/add maps are built from
+    (original from-facts captured)                 # filtered deltas — change-set.ts:141-162
+  → record physical source fingerprint (§6) BEFORE any rewrite
   → rewrite both FBs to desired names (ids + edges + payload role refs, §3)
   → canonical diff(source′, desired′)              # sees continuity; no churn
+  → filterDeltas AGAIN on canonical deltas         # filtering is delta-level
   → action emitter synthesizes rename actions from acceptedRenames (existing code)
   → emit remaining actions (no carry canceler)
 ```
 
 **Two diffs, by design.** `matchRenameCandidates` consumes the remove/add maps
-of an initial diff (`change-set.ts:140` → `:171-177`) — it cannot propose from
-raw fact bases. Diff is an in-memory Merkle compare; running it twice is cheap.
-Do not try to collapse this into one pass, and do **not** reintroduce post-diff
-remove/add cancellation to “find” renames.
+of an initial diff — and today those maps are built from the **policy-kept**
+deltas (`filterDeltas` at `change-set.ts:141-143`, maps at `:152`), not from
+`allDeltas`. Preserve that: proposals come from kept deltas on both passes.
+Diff is an in-memory Merkle compare; running it twice is cheap. Do not try to
+collapse this into one pass, and do **not** reintroduce post-diff remove/add
+cancellation to “find” renames.
+
+**What feeds what.** Everything downstream of normalization — canonical deltas,
+their filtering, replacement expansion, emission, the dependency graph, and the
+**desired-side** fingerprint (canonical desired names *are* the physical
+post-apply names) — consumes the canonical pair. **Only `source.fingerprint`
+uses `physicalSource`** (§6).
+
+**Scope: role renames only.** Normalization rewrites role-name-bearing ids,
+edges, and payload role refs. Non-role object renames (tables, views, …) keep
+today’s mechanism unchanged: matched remove/add pairs leave the worklists and
+the rename rule emits the action — that existing subtree cancellation is not
+carry folklore and is not this track’s target.
 
 ### 3. What the rewrite must touch
 
@@ -165,8 +188,16 @@ one), and that apply's gate passes against a pre-rename extraction.
   edges, payload role refs, recomputed rollups). No pipeline changes; carry
   untouched; ships dark.
 - **I1b — pipeline integration.** Wire the normalizer into `change-set.ts`
-  (discovery diff → normalize → canonical diff), record physical fingerprint
-  per §6, delete carry (and B1's carve-out), migrate tests, full corpus gate.
+  (discovery diff → filter → normalize → canonical diff → filter), record
+  physical source fingerprint per §6, delete carry (and B1's carve-out),
+  migrate tests, full corpus gate.
+
+  **I1b also owns the corpus rename opt-in.** The corpus currently plans with
+  `renames` defaulting to `"off"` (`tests/engine.test.ts:50`), so **no corpus
+  scenario exercises rename acceptance at all** — “corpus green” does not pin
+  rename behavior. Add scenario-level metadata (e.g. `meta.renames: "auto"`)
+  so B1's and I1's rename scenarios run inside the proof loop, and convert
+  B1's focused scenario into a corpus case.
 
 ## Design requirements (checklist)
 
@@ -204,8 +235,12 @@ PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts  # required
       pre-rewrite from-facts; not recovered via carry; ordering pinned by test
 - [ ] Role-name relabel churn absent from post-normalize diff
 - [ ] Column ACL + role rename regression green
-- [ ] Corpus green on at least PG 17 full run
-- [ ] Changeset: `fix` or `feat` describing identity normalization
+- [ ] Corpus green on at least PG 17 full run, **including** rename scenarios
+      running under the new `meta.renames` opt-in (I1b)
+- [ ] B1's carve-out removed or proven dead (I1b — folklore must not survive
+      under a new name)
+- [ ] Changeset: `patch` (I1a ships dark) / `minor` for I1b if the plan result
+      surface changes, else `patch`
 - [ ] Tombstone/doc for the new seam (and deleted carry)
 
 ## Conflicts / do not touch

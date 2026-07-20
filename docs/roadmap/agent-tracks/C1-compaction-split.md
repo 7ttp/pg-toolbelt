@@ -2,6 +2,11 @@
 
 **Priority:** Medium–High · **Wave:** 3 (any time after V1) · **Ship:** one PR · **Depends on:** V1 preferred (prove.ts touch-points) · **Coordinate with:** P1/P3 on `tests/engine.test.ts` · **Conflicts with:** C2, H1 (`internal.ts`); V1/P2 only if `prove.ts` API is touched
 
+> **Contract:** harness-only. Corpus builds **two plan artifacts** per
+> scenario × direction (compact on/off) and proves/applies each end-to-end,
+> with full per-mode teardown (drop DBs → `dropRolesExcept` → replay) on the
+> serial lane. No default flips in this PR.
+
 > **Scheduling note:** the old “after I1” dependency was inherited from the
 > defaults-flipping design, which edited `plan.ts`/`prove.ts` gates. Dual-prove
 > is harness-only, so it can — and preferably should — land **before I1**: I1’s
@@ -51,15 +56,19 @@ this track is genuinely harness-only.
 
 ### Primary (required)
 
-1. **Corpus dual-prove:** for every scenario × direction, build/apply/prove a
-   plan with `compact: true` **and** with `compact: false`. Both must converge
-   (state proof; data proof per existing coverage rules).
+1. **Corpus dual-prove:** for every scenario × direction, build **two plan
+   artifacts** — `plan(…, { compact: true })` and `plan(…, { compact: false })`
+   — and apply/prove **each artifact** end-to-end. Both must converge (state
+   proof; data proof per existing coverage rules). Note: `compact` exists only
+   at `plan()` time; `provePlan`/`apply` take the finished artifact
+   (`prove.ts:379-384`, `apply.ts:112-116`) — there is no downstream compact
+   setting to keep in sync, only "prove the artifact you apply."
 2. Failure message must name scenario, direction, and which compact mode failed.
 3. Cost: expect ~2× corpus wall time per PG version (~2–3 min → ~5 min on
    `postgres:17-alpine`). Acceptable; do not “optimize” by sampling unless CI
    matrix forces a documented shard strategy.
-4. Fingerprint/apply for each mode uses the **same** compact setting as that
-   plan (no cross-wired compact/uncompact).
+4. Each mode proves and applies **its own artifact** (no cross-wiring a compact
+   plan with an uncompact proof or vice versa).
 5. **Per-mode isolation for cluster-global state (roles).** The shared cluster
    has **no automatic role cleanup** (`tests/containers.ts:1-16`); role-DDL
    scenarios rely on a serial lane (`engine.test.ts` `mustRunSerially`,
@@ -97,8 +106,9 @@ this track is genuinely harness-only.
 
 - [ ] Every corpus scenario proves under `compact: true` and `compact: false`
 - [ ] Docs state compaction is a pretty-printer, not a correctness dependency
-- [ ] plan == prove == apply compact setting preserved per mode
-- [ ] Changeset: `test` / `fix` as appropriate (harness is the main deliverable)
+- [ ] Each mode's artifact proved and applied as-built (no cross-wiring)
+- [ ] Changeset: none if harness/tests only; `patch` if `plan.ts`/`prove.ts`
+      needed touching
 - [ ] Optional default flips called out separately in the PR body if included
 
 ## Conflicts / do not touch
