@@ -15,7 +15,9 @@ import {
   cmdProve,
   formatProofFailure,
   formatProofPassCaveat,
+  formatProofPassCoverage,
 } from "./prove.ts";
+import type { ProofCoverage } from "../../proof/prove.ts";
 import { buildFactBase } from "../../core/fact.ts";
 import { serializeSnapshot } from "../../core/snapshot.ts";
 import { ENGINE_VERSION } from "../../plan/plan.ts";
@@ -70,6 +72,79 @@ describe("formatProofPassCaveat (PR #338 comment 3603601155, drift parity)", () 
     expect(formatProofPassCaveat(3)).toBe(
       " (3 diagnostics on the desired snapshot — see above)",
     );
+  });
+});
+
+describe("formatProofPassCoverage (honest data-preservation coverage)", () => {
+  const ref = (schema: string, name: string) => ({ schema, name });
+
+  test("everything content-verified — no qualifier (keeps the plain message)", () => {
+    const coverage: ProofCoverage = {
+      tablesChecked: 2,
+      tablesSkipped: [],
+      perTable: [
+        {
+          table: ref("app", "a"),
+          contentMode: "fingerprint",
+          recreated: false,
+          rewriteDeclared: false,
+          rowsBefore: 3,
+          rowsAfter: 3,
+        },
+        {
+          table: ref("app", "b"),
+          contentMode: "fingerprint",
+          recreated: false,
+          rewriteDeclared: false,
+          rowsBefore: 1,
+          rowsAfter: 1,
+        },
+      ],
+    };
+    expect(formatProofPassCoverage(coverage)).toBe("");
+  });
+
+  test("a recreated table is not content-verified — qualifies and names the table", () => {
+    const coverage: ProofCoverage = {
+      tablesChecked: 1,
+      tablesSkipped: [
+        { table: ref("app", "orders"), reason: "recreated by the plan" },
+      ],
+      perTable: [
+        {
+          table: ref("app", "kept"),
+          contentMode: "fingerprint",
+          recreated: false,
+          rewriteDeclared: false,
+          rowsBefore: 2,
+          rowsAfter: 2,
+        },
+      ],
+    };
+    const out = formatProofPassCoverage(coverage);
+    expect(out).toContain("content-verified");
+    expect(out).toContain("not compared");
+    expect(out).toContain(`"app"."orders"`);
+  });
+
+  test("a count-only (schema changed) table qualifies and names the table", () => {
+    const coverage: ProofCoverage = {
+      tablesChecked: 1,
+      tablesSkipped: [],
+      perTable: [
+        {
+          table: ref("app", "widened"),
+          contentMode: "count",
+          recreated: false,
+          rewriteDeclared: false,
+          rowsBefore: 5,
+          rowsAfter: 5,
+        },
+      ],
+    };
+    const out = formatProofPassCoverage(coverage);
+    expect(out).toContain("count-only");
+    expect(out).toContain(`"app"."widened"`);
   });
 });
 

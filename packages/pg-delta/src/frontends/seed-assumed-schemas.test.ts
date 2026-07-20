@@ -323,6 +323,10 @@ describe("deriveAssumedSchemaSeed", () => {
        SET search_path TO 'public'
        SET log_min_messages TO 'fatal'
       AS $function$SELECT 1$function$;
+
+      RESET search_path;
+
+      RESET check_function_bodies;
       "
     `);
   });

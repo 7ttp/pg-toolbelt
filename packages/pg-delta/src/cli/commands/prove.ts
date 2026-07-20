@@ -7,7 +7,12 @@
 import { readFileSync } from "node:fs";
 import { parsePlan } from "../../plan/artifact.ts";
 import { rel } from "../../plan/render.ts";
-import { provePlan, type ProofVerdict } from "../../proof/prove.ts";
+import {
+  provePlan,
+  type ProofCoverage,
+  type ProofVerdict,
+  type TableRef,
+} from "../../proof/prove.ts";
 import { loadSnapshot } from "../../frontends/snapshot-file.ts";
 import { encodeId } from "../../core/stable-id.ts";
 import { exitIfBlocking, printDiagnostics } from "../diagnostics.ts";
@@ -80,6 +85,47 @@ export function formatProofFailure(verdict: ProofVerdict): string {
 export function formatProofPassCaveat(diagnosticsCount: number): string {
   if (diagnosticsCount === 0) return "";
   return ` (${diagnosticsCount} diagnostic${diagnosticsCount === 1 ? "" : "s"} on the desired snapshot — see above)`;
+}
+
+/**
+ * A coverage caveat appended to the "Proof passed" line so a passing proof never
+ * over-claims "data preservation verified" when it could not actually compare
+ * every kept table's content. The proof's `coverage` (see `ProofCoverage`) is
+ * honest per-table; this renders the parts a bare success line would hide:
+ * count-only tables (schema changed, so only the row count was trusted) and
+ * tables not compared at all (recreated/dropped by the plan). Pure + exported so
+ * it's testable without a database, alongside {@link formatProofFailure}. Empty
+ * when every kept, non-empty table was content-verified (keeps the plain
+ * message). Does NOT change ok/exit semantics — reporting honesty only.
+ */
+export function formatProofPassCoverage(coverage: ProofCoverage): string {
+  const contentVerified = coverage.perTable.filter(
+    (t) => t.contentMode === "fingerprint",
+  );
+  const countOnly = coverage.perTable.filter((t) => t.contentMode === "count");
+  const notCompared = coverage.tablesSkipped;
+  if (countOnly.length === 0 && notCompared.length === 0) return "";
+  const sample = (refs: TableRef[]): string => {
+    const shown = refs.slice(0, 3).map((t) => rel(t.schema, t.name));
+    const extra = refs.length - shown.length;
+    return extra > 0
+      ? `${shown.join(", ")} (+${extra} more)`
+      : shown.join(", ");
+  };
+  const segments = [`${contentVerified.length} content-verified`];
+  if (countOnly.length > 0) {
+    segments.push(
+      `${countOnly.length} count-only (schema changed): ${sample(countOnly.map((t) => t.table))}`,
+    );
+  }
+  if (notCompared.length > 0) {
+    segments.push(
+      `${notCompared.length} not compared (recreated/dropped): ${sample(
+        notCompared.map((t) => t.table),
+      )}`,
+    );
+  }
+  return ` — ${segments.join(", ")}`;
 }
 
 export async function cmdProve(args: string[]): Promise<void> {
@@ -208,6 +254,7 @@ export async function cmdProve(args: string[]): Promise<void> {
     if (verdict.ok) {
       process.stderr.write(
         `Proof passed: state and data preservation verified.` +
+          `${formatProofPassCoverage(verdict.coverage)}` +
           `${formatProofPassCaveat(desiredFb.diagnostics.length)}\n`,
       );
     } else {
