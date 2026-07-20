@@ -21,7 +21,8 @@ and cutover.
   and follow-ups captured from the PR #315 review, ranked P1–P3.
 - **[agent-tracks/](agent-tracks/)** — delegation-ready briefs for architecture
   follow-ups (managed view seal, rename identity, proof quality, compaction),
-  grouped for parallel agents without file collisions.
+  grouped for parallel agents without file collisions. Reviewable tour:
+  [agent-tracks/OVERVIEW.md](agent-tracks/OVERVIEW.md).
 
 ## How the engine got here
 
