@@ -49,7 +49,7 @@ do not change their semantics by accident.
 
 | Area | Paths |
 |---|---|
-| New helper | `packages/pg-delta/src/policy/view.ts` **or** new `policy/reconstruct.ts` (+ re-export from policy barrel if any) |
+| New helper | `packages/pg-delta/src/policy/view.ts` **or** new `policy/reconstruct.ts`. Do **not** re-export from the policy barrel — `./policy` is a public subpath (`package.json` exports), and this helper is internal-only |
 | Call sites (required) | `plan/phases/change-set.ts`, `proof/prove.ts`, `apply/apply.ts`, `frontends/schema-export.ts` |
 | Optional / resolveView-only | `cli/commands/diff.ts`, `frontends/seed-assumed-schemas.ts` — see note above; do not add scope projection |
 | Profile (only if needed) | `integrations/profile.ts` — wire helper into documented “how to rebuild the view” without changing profile semantics |

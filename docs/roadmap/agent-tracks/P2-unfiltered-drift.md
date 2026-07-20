@@ -39,12 +39,15 @@ managed what the user thought. The failure mode this track exists for:
 
 ## Owned files (write)
 
-| Area | Paths |
-|---|---|
-| Core | `packages/pg-delta/src/proof/prove.ts`, `proof/prove.test.ts` |
-| Types / result | Prove result type exporting both drift views |
-| CLI (if applicable) | `cli/commands/prove.ts`, `cli/commands/drift.ts` — additive fields only |
-| Docs | Short note in README prove section or `managed-view-architecture.md` |
+| PR | Area | Paths |
+|---|---|---|
+| **P2a** | Attribution plumbing | `policy/policy.ts` (`resolveView`), `policy/view.ts` (`projectManagementScope`), the V1 reconstruction helper (attribution threads through it) |
+| **P2a** | Reason codes / flags | Policy rule types + rule data (per-rule classification overrides) |
+| **P2a** | Plan artifact | `plan/plan.ts` + the plan artifact/result type (audit attached at plan time) |
+| **P2a** | Tests | Projection/policy unit tests; plan artifact tests; public-API surface tests |
+| **P2b** | Prove result | `proof/prove.ts`, `proof/prove.test.ts` — surface the plan-attached audit |
+| **P2b** | CLI | `cli/commands/prove.ts`, `cli/commands/drift.ts` — additive fields only; focused cases in `tests/cli.test.ts` |
+| **P2b** | Docs | Short note in README prove section or `managed-view-architecture.md` |
 
 ## Audit model (pinned — challenge in PR if wrong)
 
@@ -73,7 +76,18 @@ to all three.
 | **Managed drift** | Today’s prove compare, after `reconstructManagedView` — unchanged. |
 | **Suppression record** | For each delta/state the projection suppressed relative to the pre-projection catalog: `{ subject (factId or edge), stage, reasonCode, viaDescendantOf? }`. Stage enum (complete): baseline · policy scope rule · capability · management scope · reference-only projection · **managedBy provenance**. Reason codes are **stable identifiers** (data, not prose) so tooling can allowlist them. Facts pruned as descendants of an excluded root carry `viaDescendantOf: rootId` — attribution points at the decision, not the collateral. |
 | **Audit entry** | Suppression record joined with “does this subject differ between source and desired?” — only differing suppressed subjects are reported. |
-| **Classification** | **acknowledged** — suppressed by a rule that names it (profile baseline, explicit platform-schema rule, managedBy); **suspicious** — a user-namespace subject swept out by a generic/wildcard rule or scope projection. Every stage declares its **default** classification; per-rule flags override. The rubric is data, not a hardcoded schema list. |
+| **Classification** | **acknowledged** vs **suspicious**, per the pinned defaults table below; per-rule flags override. The rubric is data, not a hardcoded schema list. |
+
+**Pinned classification defaults (challenge in PR if wrong, don't improvise):**
+
+| Stage | Default | Rationale |
+|---|---|---|
+| `managedBy` provenance | acknowledged | explicit ownership marker |
+| Reference-only projection (extension members, assumed schemas) | acknowledged | structural, named mechanism |
+| Capability restriction | acknowledged | server capability is a fact, not a choice |
+| Management scope | acknowledged | explicit user/profile choice (`scope: database` etc.) |
+| Policy scope rule | per-rule flag; **default suspicious for generic/wildcard matchers, acknowledged for named-object rules** | a wildcard eating a user object is exactly the bug class |
+| Baseline | **acknowledged but always visible** — baseline-suppressed *differing* subjects are reported as their own count in the audit summary, never silently folded; strict mode escalates them | the goal says baseline bugs cannot hide: a baseline that captured user state must be detectable, but flat-suspicious would red-light every image upgrade |
 
 **Where the audit runs: plan time, pinned.** `provePlan` takes a finished
 `Plan` and has no raw pre-projection source FactBase (`prove.ts:379-384`), so

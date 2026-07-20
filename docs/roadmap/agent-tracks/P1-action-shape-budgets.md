@@ -35,9 +35,9 @@ Without budgets, maintainers optimize for green proofs over idiomatic DDL.
 | Fixtures | Opt-in per-scenario files under `packages/pg-delta/corpus/<scenario>/` e.g. `budget.json` or `expect.yaml` |
 | Unit tests | `src/proof/budgets.test.ts` |
 
-**Avoid large edits to** `proof/prove.ts` — if you need a hook, add a small
-exported `summarizeActions(plan)` and keep prove’s control flow intact so P2
-can own prove API changes.
+**Do not touch `proof/prove.ts` at all** — the budget helper reads the plan
+artifact’s action list directly (it is already accessible); no exported hook,
+no `summarizeActions` on the public surface. P2 owns prove API changes.
 
 ## Design requirements
 

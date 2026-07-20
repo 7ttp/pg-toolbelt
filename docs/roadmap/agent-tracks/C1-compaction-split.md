@@ -109,7 +109,6 @@ this track is genuinely harness-only.
 - [ ] Each mode's artifact proved and applied as-built (no cross-wiring)
 - [ ] Changeset: none if harness/tests only; `patch` if `plan.ts`/`prove.ts`
       needed touching
-- [ ] Optional default flips called out separately in the PR body if included
 
 ## Conflicts / do not touch
 

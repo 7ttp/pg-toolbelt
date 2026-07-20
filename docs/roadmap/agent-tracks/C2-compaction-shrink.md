@@ -21,7 +21,8 @@ load-bearing?” should consult payload+edges in one helper or not elide.
 
 ## Out of scope
 
-- Default compact flip (already C1)
+- Default compact flip (not happening anywhere — C1 is harness-only; any flip
+  is a separate product decision)
 - Full declarative rule IR (H2)
 - Identity (I1)
 

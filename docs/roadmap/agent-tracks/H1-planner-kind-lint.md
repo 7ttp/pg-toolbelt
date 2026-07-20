@@ -46,15 +46,15 @@ lands as another late pass.
 
 ## RED → GREEN
 
-1. Write guard in failing mode against a known bad pattern, then set allowlist
-   so CI is green.
+1. Write guard in failing mode against a known bad pattern, then record the
+   per-file baseline counts so CI is green.
 2. Optionally add one intentional violation in a test fixture file to prove the
    guard catches regressions.
 
 ## Acceptance criteria
 
 - [ ] Guard runs in `bun test src/`
-- [ ] Allowlist documented
+- [ ] Per-file baseline count table documented
 - [ ] No unrelated refactors
 - [ ] Changeset: none (tests only)
 

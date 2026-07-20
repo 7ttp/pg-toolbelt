@@ -135,6 +135,9 @@ Symmetric rewrite on source and desired for every kind in
 - Any hash-adjacent structures derived from those ids (recompute rollups after
   rewrite; do not leave stale Merkle nodes)
 - Column-qualified ACL keys (`acl:(…).grantee.column`) — full codec round-trip
+- **`FactBase.referenceOnly`** — a `ReadonlySet` of **encoded ids**
+  (`core/fact.ts:73`); remap it alongside facts and edges, or reference-only
+  tracking silently detaches from the rewritten ids
 - **Structured role-bearing payloads** — role names that live in fact
   *payloads*, not ids. Known inventory today: `policy.roles`
   (`extract/policies.ts:39`). This is **in scope**, not residual: unhandled, it
@@ -239,8 +242,8 @@ PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts  # required
       running under the new `meta.renames` opt-in (I1b)
 - [ ] B1's carve-out removed or proven dead (I1b — folklore must not survive
       under a new name)
-- [ ] Changeset: `patch` (I1a ships dark) / `minor` for I1b if the plan result
-      surface changes, else `patch`
+- [ ] Changeset: I1a **none** (ships dark — internal module, no behavior
+      change); I1b `minor` if the plan result surface changes, else `patch`
 - [ ] Tombstone/doc for the new seam (and deleted carry)
 
 ## Conflicts / do not touch

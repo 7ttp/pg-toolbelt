@@ -4,6 +4,9 @@ Detailed, delegation-ready briefs for the architecture work prioritized after
 the Jul 2026 reviews. Each track is one agent / one PR unless the brief says
 otherwise.
 
+**Start here for review:** [OVERVIEW.md](OVERVIEW.md) — ELI5/ELI10, before/after
+examples, and schematics for each big step.
+
 **Commit this folder before delegating** — untracked briefs are invisible to
 agents in fresh worktrees.
 
@@ -34,8 +37,8 @@ B1 ─────────────────────────�
 
 V1 ──► C1 (dual-prove compact and uncompact) ──► C2 / H1
        C1 is harness-only — prefer landing it BEFORE I1b so I1's corpus
-       gate validates both compact modes; coordinate with P1/P3 on
-       tests/engine.test.ts
+       gate validates both compact modes; single owner of
+       tests/engine.test.ts (see rule below)
 
 P1 parallel P3 after or beside V1; serialize P1 vs P2 on prove.ts
 P2 (attributed projection audit) after V1 — two PRs: P2a attribution
@@ -76,7 +79,7 @@ authoritative order (notably: C1 preferably lands *before* I1).
 | B1 | I1; anyone on `internal.ts` ordering or `rules/policies.ts` |
 | V1 | I1, C1, P2 (plan / prove / apply / export) |
 | I1 | B1, V1, C1, H1; anyone on `role-rename-carry`, `change-set`, `action-emitter` |
-| C1 | C2, H1 (`internal.ts`); P1/P3 on `engine.test.ts` (coordinate or serialize); V1/P2 only if `prove.ts` API touched |
+| C1 | C2, H1 (`internal.ts`); P1/P3 on `engine.test.ts` — **single owner**: C1 first, P1/P3 stack on its branch or land strictly before/after; V1/P2 only if `prove.ts` API touched |
 | P1 vs P2 | both heavy on `prove.ts` / engine harness — one owner or serialize |
 | P3 vs P2 | P3's `autoSeedEmptyTables` touch vs P2 owning `prove.ts` — serialize |
 | D0, I2 | almost nothing |
@@ -84,9 +87,11 @@ authoritative order (notably: C1 preferably lands *before* I1).
 ## Suggested first delegation
 
 1. **Agent A → B1** (urgent bug) and **Agent B → V1**, in parallel (disjoint files)
-2. **Agent C → D0** (parallel with anything); **Agent D → P3** also fine now
-3. After V1: **Agent E → C1** (dual-prove; coordinate with P3 on
-   `engine.test.ts`); parallel **Agent F → P1** (semantic budgets)
+2. **Agent C → D0** (parallel with anything); **Agent D → P3** also fine now —
+   but P3 must **land before C1 starts, or stack on C1's branch**
+   (`engine.test.ts` single owner); don't open both the same day unstacked
+3. After V1 (and P3 landed or stacked): **Agent E → C1** (dual-prove);
+   parallel **Agent F → P1** (semantic budgets)
 4. After B1 + V1: **Agent G → I1a** (pure normalizer, ships dark)
 5. After C1 + I1a: **Agent H → I1b** (integration; corpus gate covers both
    compact modes); **P2a → P2b** any time after V1 as sole `prove.ts` owner
@@ -190,6 +195,31 @@ claims verified in code):
 28. **Ops** — `engine.test.ts` single-owner rule replaces "coordinate";
     every active brief now opens with a one-line **Contract** so delegates
     get the pinned decisions without reading this log.
+
+Fifth pass (2026-07-21), editorial residue from pass 4 + one design forcing:
+
+29. **P2** — owned-files table rewritten for the P2a/P2b split (P2a touches
+    `policy/policy.ts`, `policy/view.ts`, the V1 helper, rule types/data,
+    `plan/plan.ts` + artifact type); classification **defaults pinned** per
+    stage, including the baseline decision: acknowledged-but-always-visible
+    (baseline-suppressed differing subjects get their own summary count;
+    strict escalates) — flat-acknowledged would contradict "baseline bugs
+    cannot hide," flat-suspicious would red-light every image upgrade.
+30. **I1** — normalizer must also remap `FactBase.referenceOnly` (a
+    `ReadonlySet` of encoded ids, `core/fact.ts:73`); I1a changeset corrected
+    to **none** (ships dark).
+31. **Leftover sweeps** — V1: no policy-barrel re-export (`./policy` is a
+    public subpath); C1: stale "optional default flips" acceptance line
+    removed; P1: `summarizeActions` public escape hatch removed (budgets read
+    the plan artifact directly, `prove.ts` untouched); P3: taxonomy tightened
+    to SQLSTATE **class 23** (the `DEFAULT VALUES` seeder cannot hit
+    generated/identity `428C9` — don't allowlist the unreachable); C2:
+    "already C1" default-flip leftover fixed; H1: residual "allowlist" wording
+    replaced with baseline-count language; conflict matrix + delegation now
+    match the `engine.test.ts` single-owner rule.
+32. **Rejected** — reviewer claim that `tests/cli.test.ts` doesn't exist:
+    false, the file exists (59.7K). First fully wrong checkable claim across
+    five review rounds; everything else was verified before adoption.
 
 ## Conventions for every agent
 

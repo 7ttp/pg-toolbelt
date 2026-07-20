@@ -50,10 +50,13 @@ stronger path.
    an unexpected failure class fails the scenario (or reports loudly under a
    non-strict default — pick one and document it).
 5. **Pinned taxonomy — do not improvise.** `skipped` vs `failed` is decided by
-   **SQLSTATE class**, not string matching: expected-unseedable states
-   (`23502` not-null without default, `23503` FK, `23514` check, and the
-   generated/identity-column errors) → `skipped(reason=SQLSTATE)`; everything
-   else (connection errors, syntax, permission, unknown states) →
+   **SQLSTATE class**, not string matching. The seeder inserts
+   `DEFAULT VALUES` (`prove.ts:259`), so the reachable expected-unseedable
+   errors are exactly **class 23 (integrity constraint violations)** — `23502`
+   not-null without default, `23503` FK, `23505` unique, `23514` check →
+   `skipped(reason=SQLSTATE)`. (Generated/identity `428C9` errors are
+   unreachable via `DEFAULT VALUES` — do not allowlist what cannot occur.)
+   Everything else (connection, syntax, permission, unknown states) →
    `failed(error)`. The skip-allowlist is keyed by
    `{ scenario, direction, table, reasonCode }` — no bare table names. Strict
    behavior: any `failed` outcome, or a `skipped` with a non-allowlisted key,
