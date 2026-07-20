@@ -46,6 +46,10 @@ export const indexRules: Record<string, KindRules> = {
       const id = fact.id as { schema: string; name: string };
       return { sql: `DROP INDEX ${rel(id.schema, id.name)}` };
     },
-    attributes: { def: "replace" },
+    // `valid` (pg_index.indisvalid) participates in the diff: an invalid index
+    // (failed CREATE INDEX CONCURRENTLY) differs from the desired valid one even
+    // when their `def` is identical, and the only repair is drop + recreate —
+    // hence "replace", same strategy as `def`. See extract/relations.ts.
+    attributes: { def: "replace", valid: "replace" },
   },
 };

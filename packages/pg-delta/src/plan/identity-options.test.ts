@@ -111,4 +111,21 @@ describe("identity column sequence options", () => {
     expect(idAlters[0]).toContain("SET START WITH 1");
     expect(idAlters[0]).toContain("RESTART");
   });
+
+  test("an OVERLAPPING identity bound + START change must NOT RESTART a live counter", () => {
+    // MAX 100→200 (widen) + START 50→60 with MIN unchanged: ranges [1,100] and
+    // [1,200] overlap, so a live counter stays valid. RESTART would replay
+    // already-issued values → duplicate keys. Only a DISJOINT shift may RESTART.
+    const sql = plan(
+      base([colFact({ minValue: "1", maxValue: "100", start: "50" })]),
+      base([colFact({ minValue: "1", maxValue: "200", start: "60" })]),
+    ).actions.map((a) => a.sql);
+    const idAlters = sql.filter((s) =>
+      /ALTER COLUMN "id" SET (MINVALUE|MAXVALUE|START)/.test(s),
+    );
+    expect(idAlters).toHaveLength(1);
+    expect(idAlters[0]).toContain("SET MAXVALUE 200");
+    expect(idAlters[0]).toContain("SET START WITH 60");
+    expect(idAlters[0]).not.toContain("RESTART");
+  });
 });

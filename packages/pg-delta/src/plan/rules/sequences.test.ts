@@ -78,4 +78,19 @@ describe("sequence option changes apply atomically", () => {
     expect(alters[0]).toContain("MAXVALUE 500");
     expect(alters[0]).not.toContain("RESTART");
   });
+
+  test("an OVERLAPPING range change (bound + START both move) must NOT RESTART a live counter", () => {
+    // MIN 1→0 + START 1→2 with the max bound unchanged: the ranges [1, MAX] and
+    // [0, MAX] overlap, so a live counter (e.g. 500) stays valid. RESTART here
+    // would replay already-issued values → duplicate keys. Only a DISJOINT
+    // range shift may RESTART.
+    const alters = seqAlters(
+      seqFact({ minValue: "1", start: "1" }),
+      seqFact({ minValue: "0", start: "2" }),
+    );
+    expect(alters).toHaveLength(1);
+    expect(alters[0]).toContain("MINVALUE 0");
+    expect(alters[0]).toContain("START WITH 2");
+    expect(alters[0]).not.toContain("RESTART");
+  });
 });

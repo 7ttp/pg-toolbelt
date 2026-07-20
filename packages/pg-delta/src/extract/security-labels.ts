@@ -27,17 +27,34 @@ const LABELED_RELKINDS: Record<string, StableId["kind"]> = {
  *  fact — it is surfaced as an unresolved-label diagnostic instead. */
 const COLUMN_BEARING_RELKINDS = new Set(["r", "p", "f"]);
 
-/** classoids whose pg_seclabel rows the resolver turns into facts. The
- *  unresolved-label diagnostic flags any local label OUTSIDE this set (e.g. a
- *  label on a LANGUAGE, LARGE OBJECT, or a pg_class relkind we don't model). */
+/** classoids whose pg_seclabel rows the resolver turns into facts UNCONDITIONALLY.
+ *  The unresolved-label diagnostic flags any local label OUTSIDE this set (e.g. a
+ *  label on a LANGUAGE, LARGE OBJECT, or a pg_class relkind we don't model).
+ *  `pg_type` is DELIBERATELY absent: only the modeled type KINDS resolve (see
+ *  {@link modeledTypeKindSql}), so it is special-cased in both the resolver and
+ *  the diagnostic rather than blanket-resolved. */
 const RESOLVED_LOCAL_CLASSOIDS = [
   "pg_proc",
   "pg_namespace",
-  "pg_type",
   "pg_event_trigger",
   "pg_publication",
   "pg_subscription",
 ] as const;
+
+/** pg_type kinds `extractTypes` (src/extract/types.ts) actually models: domains
+ *  ('d'), enums ('e'), ranges ('r'), and STANDALONE composites — a composite
+ *  whose backing pg_class relkind is 'c'. A table's row type is also typtype='c'
+ *  but its pg_class relkind is 'r'/'p', and a base/shell/pseudo type is some
+ *  OTHER typtype; none of those get a `type` fact. A SECURITY LABEL on such an
+ *  unmodeled pg_type row therefore has no parent fact to attach to — pushing it
+ *  anyway made buildFactBase throw missing-parent and crash extraction. The
+ *  predicate (bound to a pg_type alias) is shared by the resolver query and the
+ *  unresolved-label diagnostic so the two can never drift. */
+function modeledTypeKindSql(alias: string): string {
+  return `(${alias}.typtype IN ('d', 'e', 'r')
+    OR (${alias}.typtype = 'c' AND EXISTS (
+      SELECT 1 FROM pg_class tc WHERE tc.oid = ${alias}.typrelid AND tc.relkind = 'c')))`;
+}
 
 export async function extractSecurityLabels(
   ctx: ExtractContext,
@@ -152,7 +169,7 @@ export async function extractSecurityLabels(
       FROM pg_seclabel sl
       JOIN pg_type t ON t.oid = sl.objoid AND sl.classoid = 'pg_type'::regclass
       JOIN pg_namespace n ON n.oid = t.typnamespace
-      WHERE ${USER_SCHEMA_FILTER}
+      WHERE ${USER_SCHEMA_FILTER} AND ${modeledTypeKindSql("t")}
       ORDER BY 1, 3, 4`)) {
     pushSeclabel(
       {
@@ -250,6 +267,10 @@ export async function extractSecurityLabels(
                -- view/matview column label is unresolved (no column fact)
                (sl.objsubid > 0 AND c.relkind IN (${columnRelkindList}))
                OR (sl.objsubid = 0 AND c.relkind IN (${relkindList})))))
+          -- a pg_type label resolves only for a MODELED type kind; a label on a
+          -- base/shell/table-rowtype pg_type is unresolved (no type fact)
+          OR (sl.classoid = 'pg_type'::regclass AND EXISTS (
+             SELECT 1 FROM pg_type t WHERE t.oid = sl.objoid AND ${modeledTypeKindSql("t")}))
           OR sl.classoid IN (${classoidList})
         )
         UNION ALL

@@ -245,4 +245,33 @@ describe.skipIf(skipSeclabelProof)("security-label end-to-end proof", () => {
       diagnostics.some((d) => d.code === "unresolved_security_label"),
     ).toBe(true);
   }, 240_000);
+
+  test("a label on an UNMODELED pg_type kind surfaces as unresolved (not a mis-diagnosed orphan)", async () => {
+    const cluster = await seclabelCluster();
+    const db = await cluster.createDb("sl_unmodeled_type");
+    dbs.push(db);
+    // A table's ROW TYPE is a pg_type row (typtype='c') whose backing pg_class
+    // relkind is 'r', so extractTypes does NOT model it (only STANDALONE
+    // composites with relkind='c' are). The pg_type seclabel resolver mapped
+    // EVERY non-domain pg_type row to a `type` fact, so this label produced a
+    // satellite parented on a type fact that never existed.
+    await db.pool.query(`
+      CREATE TABLE public.rowty (a integer, b text);
+      SECURITY LABEL FOR 'dummy' ON TYPE public.rowty IS 'secret';
+    `);
+    // RED before the fix: the orphaned satellite was swept by
+    // pruneOrphanedSatellites into an `orphaned_satellite` diagnostic (severity
+    // `info` — NOT blocked by --strict-coverage), so the unmodeled-target label
+    // slipped through the strict gate: `unresolved_security_label` was absent.
+    // (Without the pruneOrphanedSatellites crash guard it would throw
+    // missing-parent outright.) GREEN: the resolver skips unmodeled type kinds,
+    // so the label flows to the intended `unresolved_security_label` warning.
+    const { diagnostics } = await extract(db.pool);
+    expect(
+      diagnostics.some((d) => d.code === "unresolved_security_label"),
+    ).toBe(true);
+    expect(diagnostics.some((d) => d.code === "orphaned_satellite")).toBe(
+      false,
+    );
+  }, 240_000);
 });

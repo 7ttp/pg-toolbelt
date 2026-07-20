@@ -254,6 +254,30 @@ export function identityOptionsClause(
   return parts.length === 0 ? "" : ` (${parts.join(" ")})`;
 }
 
+/** true when the OLD `[oldMin, oldMax]` value range and the NEW `[newMin, newMax]`
+ *  range are provably DISJOINT (`oldMax < newMin || oldMin > newMax`).
+ *
+ *  A sequence's / identity's live counter (`last_value`) is UNMODELED runtime
+ *  state — the diff never sees it. When the two ranges are disjoint the counter
+ *  is GUARANTEED to fall outside the new range, so the only in-place path that
+ *  converges is `RESTART` (realign to the new START, always inside the new range
+ *  — matching what a fresh `… START WITH …` would produce). When the ranges
+ *  OVERLAP we must NOT `RESTART`: the live counter is very likely still valid
+ *  (e.g. counter at 500, MIN 1→0 + START 1→2 leaves 500 usable), and silently
+ *  resetting it to START replays already-issued values → duplicate keys. If an
+ *  overlapping change happens to leave the counter outside the new range,
+ *  PostgreSQL rejects the ALTER loudly and the operator decides — we never
+ *  silently reset. Bounds are bigint-valued, so compare with BigInt (they reach
+ *  9223372036854775807, past Number's safe-integer range). */
+function rangesDisjoint(
+  oldMin: string,
+  oldMax: string,
+  newMin: string,
+  newMax: string,
+): boolean {
+  return BigInt(oldMax) < BigInt(newMin) || BigInt(oldMin) > BigInt(newMax);
+}
+
 /** in-place identity-sequence parameter transition (no rebuild), emitted as ONE
  *  `ALTER COLUMN … SET <opt> SET <opt> …` statement.
  *
@@ -263,15 +287,10 @@ export function identityOptionsClause(
  *  Postgres rejects the transient `min > max`. Chaining defers the range check to
  *  the end of the statement (verified on PG15/17).
  *
- *  `RESTART` is appended only when a BOUND (min/max) AND the START both moved: the
- *  backing sequence's current value (unmanaged runtime state, not part of the
- *  diff) is otherwise left where it was, and a range that shifts entirely off the
- *  old start leaves that value outside the new bounds — Postgres then rejects the
- *  ALTER (`RESTART value … cannot be greater than MAXVALUE …`). Realigning to the
- *  new START (which is always inside the new range) is the only in-place path that
- *  converges, and matches what a fresh `GENERATED … AS IDENTITY (START WITH …)`
- *  would produce. A bounds-only or start-only change never needs it (the old
- *  value still fits), so ordinary edits do not reset the counter. */
+ *  `RESTART` is appended only when the old and new ranges are provably DISJOINT
+ *  (see {@link rangesDisjoint}). An overlapping change — even one that moves a
+ *  bound AND the START — leaves the live counter alone, because it is probably
+ *  still valid and resetting it risks duplicate keys. */
 export function identityOptionAlterSpecs(
   target: string,
   from: IdentityOptions | null,
@@ -281,18 +300,22 @@ export function identityOptionAlterSpecs(
   const clauses: string[] = [];
   if (from == null || from.increment !== to.increment)
     clauses.push(`SET INCREMENT BY ${to.increment}`);
-  const minChanged = from == null || from.minValue !== to.minValue;
-  if (minChanged) clauses.push(`SET MINVALUE ${to.minValue}`);
-  const maxChanged = from == null || from.maxValue !== to.maxValue;
-  if (maxChanged) clauses.push(`SET MAXVALUE ${to.maxValue}`);
-  const startChanged = from == null || from.start !== to.start;
-  if (startChanged) clauses.push(`SET START WITH ${to.start}`);
+  if (from == null || from.minValue !== to.minValue)
+    clauses.push(`SET MINVALUE ${to.minValue}`);
+  if (from == null || from.maxValue !== to.maxValue)
+    clauses.push(`SET MAXVALUE ${to.maxValue}`);
+  if (from == null || from.start !== to.start)
+    clauses.push(`SET START WITH ${to.start}`);
   if (from == null || from.cache !== to.cache)
     clauses.push(`SET CACHE ${to.cache}`);
   if (from == null || from.cycle !== to.cycle)
     clauses.push(`SET ${to.cycle ? "CYCLE" : "NO CYCLE"}`);
   if (clauses.length === 0) return [];
-  if ((minChanged || maxChanged) && startChanged) clauses.push("RESTART");
+  if (
+    from != null &&
+    rangesDisjoint(from.minValue, from.maxValue, to.minValue, to.maxValue)
+  )
+    clauses.push("RESTART");
   return [{ sql: `${target} ${clauses.join(" ")}` }];
 }
 
@@ -340,11 +363,12 @@ function sequenceOptionClause(fact: Fact, option: string): string {
  *  in diff-field (lexicographic) order ran `MAXVALUE 50` while MIN was still 100
  *  when moving both bounds down, and Postgres rejects the transient `min > max`.
  *
- *  `RESTART` is appended only when a BOUND (min/max) AND the START both moved —
- *  see {@link identityOptionAlterSpecs} for the identity seam's identical
- *  reasoning: the sequence's current value (unmanaged runtime state, not part of
- *  the diff) is left in place, and a range that shifts entirely off the old start
- *  leaves that value outside the new bounds, which Postgres rejects. */
+ *  `RESTART` is appended only when the old and new ranges are provably DISJOINT —
+ *  see {@link rangesDisjoint} and {@link identityOptionAlterSpecs} for the
+ *  identity seam's identical reasoning: the sequence's live counter (unmanaged
+ *  runtime state, not part of the diff) is left in place for an overlapping
+ *  change, because it is probably still valid and resetting it risks duplicate
+ *  keys; only a disjoint shift guarantees the counter is invalid. */
 export function sequenceOptionAlter(
   currentAttr: string,
   fact: Fact,
@@ -359,10 +383,16 @@ export function sequenceOptionAlter(
   if (currentAttr !== lead) return [];
   const id = fact.id as { schema: string; name: string };
   const clauses = changed.map((option) => sequenceOptionClause(fact, option));
-  const boundsChanged =
-    changed.includes("minValue") || changed.includes("maxValue");
-  const startChanged = changed.includes("start");
-  if (boundsChanged && startChanged) clauses.push("RESTART");
+  if (
+    source !== undefined &&
+    rangesDisjoint(
+      str(source.payload["minValue"]),
+      str(source.payload["maxValue"]),
+      str(p(fact, "minValue")),
+      str(p(fact, "maxValue")),
+    )
+  )
+    clauses.push("RESTART");
   return [
     { sql: `ALTER SEQUENCE ${rel(id.schema, id.name)} ${clauses.join(" ")}` },
   ];
