@@ -931,6 +931,15 @@ export async function loadSqlFiles(
     // expression extraction uses (src/extract/routines.ts) so the encoded
     // `StableId` reconstructed per row matches the seed's `seededRoutines` keys
     // byte-for-byte — the leniency gate is by overload-safe identity, not name.
+    // format_type's output is search_path-sensitive, and extraction runs under
+    // the canonical `search_path = pg_catalog` (everything else comes back
+    // schema-qualified) — so this query must run under the SAME path or a
+    // user-type arg (`hstore` vs `public.hstore`) breaks the byte-for-byte key
+    // match. Scope the canonical path to this query alone via a transaction:
+    // body re-validation below must keep the session's own path so bodies
+    // resolve as they would at apply time.
+    await client.query(`BEGIN`);
+    await client.query(`SET LOCAL search_path TO 'pg_catalog'`);
     const defs = await client.query(`
       SELECT n.nspname AS nspname, p.proname AS proname, p.prokind AS prokind,
              ARRAY(SELECT format_type(t.t, NULL)
@@ -946,6 +955,7 @@ export async function loadSqlFiles(
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend d
           WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')`);
+    await client.query(`COMMIT`);
     await client.query(`SET check_function_bodies = on`);
     const bodyErrors: Diagnostic[] = [];
     const bodyWarnings: Diagnostic[] = [];
