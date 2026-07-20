@@ -25,7 +25,7 @@ Without budgets, maintainers optimize for green proofs over idiomatic DDL.
 
 | Area | Paths |
 |---|---|
-| Budget helper | New `packages/pg-delta/src/proof/budgets.ts` (preferred) **or** test-only helper under `tests/` |
+| Budget helper | Test-only helper under `tests/` (preferred — keeps the shipped `proof/` surface clean) **or** `src/proof/budgets.ts` if a real library use case exists |
 | Harness | `packages/pg-delta/tests/engine.test.ts` (minimal hook) |
 | Fixtures | Opt-in per-scenario files under `packages/pg-delta/corpus/<scenario>/` e.g. `budget.json` or `expect.yaml` |
 | Unit tests | `src/proof/budgets.test.ts` |
@@ -36,7 +36,11 @@ can own prove API changes.
 
 ## Design requirements
 
-1. Budgets are **opt-in per scenario** (don’t break 300+ scenarios on day one).
+1. Budgets are **opt-in per scenario** (don’t break 300+ scenarios on day one),
+   and **per direction**: the corpus proves a→b and b→a, whose plan shapes
+   legitimately differ. The fixture format must let a budget target one
+   direction or both explicitly (e.g. `{"a-to-b": …, "b-to-a": …}`); a
+   direction-blind budget will false-positive on the reverse run.
 2. Start with a small allowlist of high-risk scenarios (replace-vs-alter for
    tables/columns, views/policies rebuild storms, extension drops).
 3. Budget dimensions — **lead with semantic assertions** (stable, express intent):

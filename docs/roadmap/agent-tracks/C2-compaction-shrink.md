@@ -26,14 +26,22 @@ load-bearing?” should consult payload+edges in one helper or not elide.
 - Possibly `plan/rules/metadata.ts` if an elision becomes a rule suppress
 - Docs: comment pass list in README compact section
 
+## Evidence gate
+
+Prefer opening this track only when C1's dual-prove has surfaced a concrete
+compact/uncompact divergence, or a specific elision is implicated in a bug.
+A purely aesthetic LOC-reduction pass on `internal.ts` is not worth the risk.
+
 ## Method
 
 1. Inventory compaction passes (README already lists ~5).
-2. Classify each: **pure cosmetic** vs **encodes PG default/create model**.
-3. For load-bearing ones:
-   - move suppress/redirect into `KindRules`, or
-   - keep behind pretty-only with a named export + unit tests proving
-     equivalence on fixtures.
+2. Classify each on **two axes**: (a) pure cosmetic vs encodes PG
+   default/create model; (b) **per-fact suppression vs cross-action folding**.
+3. Only **per-fact** suppressions are candidates to move into `KindRules` —
+   cross-action folding (revoke/grant pairs, cascade subsumption) is
+   plan-global by nature and **cannot** be expressed as a per-kind rule; those
+   passes stay pretty-only with a named export + unit tests proving
+   equivalence on fixtures.
 4. Prefer fewer passes over cleverer passes.
 
 ## RED → GREEN

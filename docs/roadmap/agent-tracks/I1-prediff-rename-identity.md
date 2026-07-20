@@ -1,6 +1,6 @@
 # I1 — Pre-diff rename identity normalization
 
-**Priority:** Highest strategic · **Wave:** 2 · **Ship:** one PR · **Depends on:** V1 merged; C1 dual-prove preferred first (corpus gate then covers both compact modes) · **Conflicts with:** C1, H1, anyone on carry/emitter
+**Priority:** Highest strategic · **Wave:** 2 · **Ship:** **two PRs** — I1a (pure normalizer, no pipeline change) then I1b (pipeline integration + carry deletion) · **Depends on:** V1 merged; **B1 merged** (cycle fix + scenario become I1's pin); C1 dual-prove preferred first (corpus gate then covers both compact modes) · **Conflicts with:** B1, C1, H1, anyone on carry/emitter
 
 ## Goal
 
@@ -87,14 +87,21 @@ What normalization changes *around* that existing seam:
   also leans on old ids existing on the source side.
 
 ```text
-propose + accept renames (original from-facts captured)
-  → rewrite both FBs to desired names
-  → diff(normalizedSource, normalizedDesired)      # sees continuity; no churn
+discovery diff(source, desired)                    # EXISTING: proposals need its
+  → propose + accept renames                       # remove/add pairs — renames.ts:48
+    (original from-facts captured)                 # takes diff deltas, not raw FBs
+  → record physical fingerprint (see §6) BEFORE any rewrite
+  → rewrite both FBs to desired names (ids + edges + payload role refs, §3)
+  → canonical diff(source′, desired′)              # sees continuity; no churn
   → action emitter synthesizes rename actions from acceptedRenames (existing code)
   → emit remaining actions (no carry canceler)
 ```
 
-Do **not** reintroduce post-diff remove/add cancellation to “find” renames.
+**Two diffs, by design.** `matchRenameCandidates` consumes the remove/add maps
+of an initial diff (`change-set.ts:140` → `:171-177`) — it cannot propose from
+raw fact bases. Diff is an in-memory Merkle compare; running it twice is cheap.
+Do not try to collapse this into one pass, and do **not** reintroduce post-diff
+remove/add cancellation to “find” renames.
 
 ### 3. What the rewrite must touch
 
@@ -105,6 +112,16 @@ Symmetric rewrite on source and desired for every kind in
 - Any hash-adjacent structures derived from those ids (recompute rollups after
   rewrite; do not leave stale Merkle nodes)
 - Column-qualified ACL keys (`acl:(…).grantee.column`) — full codec round-trip
+- **Structured role-bearing payloads** — role names that live in fact
+  *payloads*, not ids. Known inventory today: `policy.roles`
+  (`extract/policies.ts:39`). This is **in scope**, not residual: unhandled, it
+  produced the B1 dependency cycle (policy `consumes`/`releases` vs the rename
+  action — see [B1](B1-role-rename-policy-cycle.md)), and “zero carry folklore”
+  is false if payload refs still need a special-case carve-out. After
+  normalization the policy delta vanishes entirely (correct: `polroles` is
+  OID-carried, Postgres renames it for free) and B1's carve-out is deleted
+  along with carry. Inventory payload role-ref fields explicitly in the PR;
+  `policy.roles` is the only known case.
 
 Prefer **copy-on-write** fact bases; do not mutate extract outputs shared with
 other commands unless proven safe.
@@ -120,6 +137,36 @@ scope for that pin.
 Default goal: **delete** `role-rename-carry` cancel logic. If a residual remains,
 document the exact kinds and why; do not keep the full Depth Module “just in
 case.”
+
+### 6. Physical vs canonical source — the fingerprint gate
+
+`plan.source.fingerprint` is recorded from the managed view (`plan.ts:516`) and
+`apply()` re-extracts the **physical** target — which still has pre-rename
+names — and compares (`apply/apply.ts:158-186`). Today no mismatch exists
+because nothing rewrites `source`. Under I1, a naive “normalize, then plan”
+would fingerprint post-rename ids and the gate would **always fail** against
+the real database.
+
+Therefore keep both:
+
+- **`physicalSource`** — the un-rewritten managed view; sole input for
+  `source.fingerprint` and the apply gate.
+- **`canonicalSource` / `canonicalDesired`** — the rewritten pair; used only
+  for the canonical diff and planning.
+
+Add a regression test: plan with an accepted role rename, assert the recorded
+fingerprint equals the physical managed view's root hash (not the canonical
+one), and that apply's gate passes against a pre-rename extraction.
+
+## Two-PR split
+
+- **I1a — pure normalizer.** `plan/identity-normalize.ts` (+ unit tests): given
+  a fact base and an accepted-rename map, return the rewritten copy (ids,
+  edges, payload role refs, recomputed rollups). No pipeline changes; carry
+  untouched; ships dark.
+- **I1b — pipeline integration.** Wire the normalizer into `change-set.ts`
+  (discovery diff → normalize → canonical diff), record physical fingerprint
+  per §6, delete carry (and B1's carve-out), migrate tests, full corpus gate.
 
 ## Design requirements (checklist)
 
@@ -140,7 +187,8 @@ case.”
    rename action(s) and does **not** contain REVOKE/GRANT churn for the rename.
 3. Do **not** use “assert carry module is unimported” as the primary pin.
 
-**GREEN:** Implement normalizer + rename injection; remove carry; re-run:
+**GREEN:** Implement normalizer (rename emission stays in the existing
+action-emitter seam — decision §2); remove carry; re-run:
 
 ```bash
 cd packages/pg-delta
@@ -168,5 +216,6 @@ PGDELTA_TEST_IMAGE=postgres:17-alpine bun test tests/engine.test.ts  # required
 
 ## Done when
 
-Carry is gone or trivially thin; I2 can document the invariant; C1 can proceed
-without fighting rename cancellation order.
+Carry is gone or trivially thin (including B1's carve-out); I2 can document the
+invariant. C1's dual-prove is expected to be in place already (see scheduling) —
+I1's corpus gate then covers both compact modes.

@@ -50,6 +50,12 @@ diff-path claim.
    - **Engine slice** — `core + extract + plan + proof + apply + policy + integrations`
    - **Product surface** — `frontends + cli`
    - **Published package total** — all non-test `src/`
+
+   Include the sql-format wording absorbed from retired
+   [K1](K1-sql-format-boundary.md): state that “engine LOC” excludes
+   `frontends/sql-format` (~3.8k), and note the boundary is already physical —
+   `./sql-format` is a package subpath export (`package.json:78-83`) that the
+   root index does not re-export, so core embedders never load the formatter.
 3. Where “79% smaller / ~11.5k” appears as historical rewrite result, either:
    - keep it clearly labeled as **rewrite-era snapshot**, or
    - replace with current numbers and move the historical claim to build-log.

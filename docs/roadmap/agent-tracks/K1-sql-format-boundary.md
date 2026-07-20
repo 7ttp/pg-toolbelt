@@ -1,59 +1,23 @@
-# K1 — Honest boundary for sql-format / frontends
+# K1 — sql-format boundary (**retired — folded into D0**)
 
-**Priority:** Low · **Wave:** 6 · **Ship:** alone · **Parallel with:** almost everything · **Conflicts with:** agents restructuring `frontends/` broadly
+**Status:** Retired 2026-07-20. Do not delegate.
 
-## Goal
+## Why retired
 
-Make the **engine vs product surface** budget honest: `frontends/sql-format`
-(~3.8k LOC) and related export/load helpers should be mentally (and optionally
-physically) separate from the trusted extract/diff/plan/proof core.
+Fact-check against the package showed the boundary **already exists**:
 
-## Why this track exists
+- `packages/pg-delta/package.json:78-83` exports `./sql-format` (and
+  `./extract`, `./plan`, `./apply`, `./proof`, `./core`, `./policy`, …) as
+  subpaths.
+- The root package (`src/index.ts`) does **not** re-export sql-format — core
+  embedders never pull in the formatter.
 
-Package LOC ~27k; frontends alone ~7.8k. Overview’s “lean rewrite” story fails
-when sql-format counts as “engine.” Architecture reviews asked to treat
-sql-format as a separate mental budget so engine size stays truthful (pairs with
-D0).
+Tier B (package/subpath boundary) is therefore done, and Tier A (docs wording:
+“engine LOC excludes sql-format”, import guidance for embedders) is a
+paragraph, not a track. That paragraph is now **owned by
+[D0](D0-docs-metrics.md)** as part of its three-budget split (engine slice /
+product surface / package total).
 
-## Out of scope
-
-- Planner/proof/identity changes
-- Rewriting the formatter algorithm
-- Mandatory new npm package (optional stretch)
-
-## Owned files (write)
-
-Pick **one** delivery tier and state it in the PR:
-
-### Tier A (minimum — docs + exports)
-
-- `docs/overview.md` / architecture README — call out frontend budget (coordinate
-  with D0 if both open: D0 owns overview numbers, K1 owns “sql-format is not
-  core” wording)
-- `packages/pg-delta/src/index.ts` / `frontends/index.ts` — ensure public export
-  paths make “core vs frontend” obvious
-- Package README structure section
-
-### Tier B (stretch — package boundary)
-
-- Move `frontends/sql-format` to `packages/pg-delta-sql-format` or subpath export
-  `@supabase/pg-delta/sql-format`
-- Update dependents + changeset for both packages if split
-
-Prefer **Tier A** unless product already wants a split publish.
-
-## Acceptance criteria
-
-- [ ] Docs clearly exclude sql-format from “engine LOC”
-- [ ] Import guidance: core embedders need not pull formatter
-- [ ] If Tier B: CI/build/exports green; changeset(s) for publish surface
-- [ ] No formatter behavior change unless accidental and tested
-
-## Test plan
-
-- Tier A: docs only
-- Tier B: `bun run build`, `bun run check-types`, targeted frontend tests
-
-## Done when
-
-Agents measuring “engine size” stop counting sql-format as planner complexity.
+If a physical package split (`@supabase/pg-delta-sql-format`) is ever wanted,
+that is a product/publishing decision — open a fresh issue with the use case;
+this brief does not cover it.

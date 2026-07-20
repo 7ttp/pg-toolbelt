@@ -74,10 +74,19 @@ do not change their semantics by accident.
      },
    ): FactBase
    ```
+   **Keep it internal.** Do not export from the package index (`src/index.ts`)
+   — the invariant is internal, and `ResolvedProfile` remains the public
+   safe-composition surface. Export later only if a concrete embedder use case
+   appears.
 2. **Order is fixed inside the helper:** `resolveView` then `projectManagementScope`.
    Document why (owner edges needed before role prune under database scope).
-3. **Identity at `scope: "cluster"`** with no policy/baseline/capability remains
-   the raw fact base (corpus must stay green).
+3. **Behavior pin = byte-identical output vs today at every call site** — not
+   “identity on the raw fact base.” `resolveView` with no policy/baseline/
+   capability is true identity **only** when the fact base has no extension
+   members and no `managedBy` provenance: `extensionMemberReferenceOnly` and
+   `excludeByProvenance(base, "managedBy")` run unconditionally
+   (`policy/policy.ts:838-850`; early return at `:887`). Do not write a test
+   asserting raw-FB identity in the general case — it is false.
 4. Call sites pass the same knobs they pass today — behavior-preserving refactor.
 5. Add a unit/guard test:
    - Prefer: `reconstruct.guard.test.ts` that fails if
@@ -108,7 +117,8 @@ do not change their semantics by accident.
 - [ ] Guard prevents reintroduction of open-coded `resolveView`+scope composition
 - [ ] No intentional behavior change; existing view/scope tests still pass
 - [ ] Short note in `managed-view-architecture.md` pointing at the helper
-- [ ] Changeset: `patch` (new exported helper on the public surface)
+- [ ] Changeset: none (internal refactor, no behavior change, no public
+      surface change); `patch` only if any public export does move
 
 ## Conflicts / do not touch
 

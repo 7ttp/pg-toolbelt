@@ -42,7 +42,10 @@ the path humans actually run. Dual-prove fixes the stated problem directly.
 | Plan options | `plan/plan.ts` only as needed to make compact on/off explicit and testable |
 | Prove | `proof/prove.ts` only if harness needs a clean “prove this plan artifact” API |
 | Docs | README / corpus note: both shapes must converge |
-| Optional product | CLI flags / library default — **after** dual-prove is green |
+
+**Not in this PR:** CLI flags, library defaults, any product-behavior change.
+Default flips are a **follow-up decision** taken after dual-prove is green —
+this track is genuinely harness-only.
 
 ## Design requirements
 
@@ -57,12 +60,25 @@ the path humans actually run. Dual-prove fixes the stated problem directly.
    matrix forces a documented shard strategy.
 4. Fingerprint/apply for each mode uses the **same** compact setting as that
    plan (no cross-wired compact/uncompact).
+5. **Per-mode isolation for cluster-global state (roles).** The shared cluster
+   has **no automatic role cleanup** (`tests/containers.ts:1-16`); role-DDL
+   scenarios rely on a serial lane (`engine.test.ts` `mustRunSerially`,
+   ~249-257) and never re-run today. Running the same scenario twice back-to-back
+   collides on leftover role state. Between modes, do a **full teardown and
+   replay**, in this order: drop the scenario's clone/shadow **databases first**
+   (a role owning objects or holding grants in any live DB cannot be dropped),
+   then `dropRolesExcept(baseline)` (`containers.ts:163-176`), then replay the
+   scenario from its SQL for the second mode. Role-DDL scenarios stay on the
+   serial lane. Resetting roles while scenario databases are still alive is
+   **not** sufficient.
 
-### Secondary (optional in same PR or follow-up)
+### Follow-up only (not this PR)
 
-5. Product default for human CLI `plan` output may stay compacted; library
-   embedders may choose either. Document clearly.
-6. Do **not** land a default flip that removes compact from CI coverage.
+6. Product default for human CLI `plan` output may stay compacted; library
+   embedders may choose either. Decide and document in a separate PR after
+   dual-prove is green.
+7. Whatever is decided, do **not** land a default flip that removes compact
+   from CI coverage.
 
 ## RED → GREEN
 

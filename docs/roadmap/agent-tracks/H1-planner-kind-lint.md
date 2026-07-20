@@ -22,19 +22,24 @@ lands as another late pass.
 ## Owned files (write)
 
 - New: `packages/pg-delta/src/plan/plan.guard.test.ts` (name flexible)
-- Allowlist comment block documenting approved files:
-  - `plan/rules/**` — allowed
-  - `plan/phases/replacement-expansion.ts` — allowed with note
-  - `plan/internal.ts` — temporary allowlist entries shrinking over time
+- A **per-file baseline count table** (see design requirements) — `plan/rules/**`
+  exempt by design (the rule table is where kind knowledge belongs)
 - Optional: tiny cleanups **only** if needed to make the baseline lint pass
 
 ## Design requirements
 
 1. Mirror the spirit of `diff.guard.test.ts` (grep for kind string literals or
    `kind ===` in disallowed paths).
-2. Start with a **baseline allowlist** that matches today’s code — lint is
-   ratchet, not a rewrite.
-3. PR description lists allowlist entries and which track will remove them.
+2. **Per-file count ratchet, not a file allowlist.** `plan/` has ~79 existing
+   kind-checks; a file-level allowlist that blesses `internal.ts` wholesale is
+   toothless (new switches in an allowlisted file pass silently). Instead:
+   record today’s count per file as the baseline; the guard fails if any
+   file’s count **exceeds** its baseline; shrinking is allowed and should be
+   committed as a baseline update in the same PR that removes the checks.
+3. `plan/rules/**` is exempt (kind knowledge belongs in the rule table);
+   everything else in `plan/` gets a baseline entry.
+4. PR description lists the baseline table and which tracks are expected to
+   shrink which entries.
 
 ## RED → GREEN
 

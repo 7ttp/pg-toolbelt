@@ -25,6 +25,7 @@ stronger path.
 |---|---|
 | Corpus harness | `packages/pg-delta/tests/engine.test.ts` |
 | CI | `.github/workflows/tests.yml` only if an env flag is required |
+| Seeder observability | `proof/prove.ts` — **only** the `autoSeedEmptyTables` function and the seed-outcome plumbing into the result type (requirement 4); serialize with P2, which owns the rest of `prove.ts` |
 | Prove defaults (careful) | Prefer harness-level `autoSeed: true` over changing global library default |
 | Docs | One line in `packages/pg-delta/README.md` prove section or corpus docs |
 
@@ -35,6 +36,15 @@ stronger path.
 2. If some scenarios cannot seed (extensions, exotic types), allowlist skips with
    reason — don’t weaken the global default for everyone.
 3. Failures must be actionable (which scenario, which table, coverage mode).
+4. **Fix seeder observability first — flipping the flag alone proves nothing.**
+   `autoSeedEmptyTables` currently swallows insert failures with an empty catch
+   (`proof/prove.ts:257-263`), so `contentMode: "none"` conflates “genuinely
+   unseedable” with “failed for an unexpected reason nobody saw.” Required:
+   record a per-table seed outcome — `seeded | skipped(reason) | failed(error)`
+   — and surface it in the prove result. Then enforce a **coverage contract**
+   in the corpus: a table ending at `"none"` must carry an allowlisted reason;
+   an unexpected failure class fails the scenario (or reports loudly under a
+   non-strict default — pick one and document it).
 
 ## RED → GREEN
 
@@ -49,14 +59,20 @@ stronger path.
 ## Acceptance criteria
 
 - [ ] Corpus CI path runs with autoSeed enabled
+- [ ] Per-table seed outcome (`seeded | skipped(reason) | failed(error)`)
+      recorded and surfaced; no empty-catch swallowing remains
+- [ ] Coverage contract enforced: `contentMode: "none"` only with an
+      allowlisted reason; unexpected failure classes are loud
 - [ ] Library default for ad-hoc `provePlan` unchanged (or documented if changed)
 - [ ] Skip list (if any) documented
-- [ ] Changeset if prove public defaults change; else `test`/`ci` only
+- [ ] Changeset: `fix` (seed-outcome reporting is a behavior change) + the
+      harness/CI part
 
 ## Conflicts
 
 - Light touch on `engine.test.ts` — coordinate with P1 if both land the same week
-- Avoid editing `prove.ts` control flow (P2’s turf)
+- `prove.ts`: only the seeding function + outcome plumbing; everything else is
+  P2’s turf — serialize with P2 rather than sharing the file
 
 ## Done when
 
