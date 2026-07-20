@@ -1,6 +1,6 @@
 # P1 — Action-shape budgets in corpus
 
-**Priority:** High (proof quality) · **Wave:** 3 · **Ship:** alone · **Depends on:** V1 preferred · **Serialize with:** P2 if both edit `prove.ts`
+**Priority:** High (proof quality) · **Wave:** 3 · **Ship:** alone · **Depends on:** V1 preferred · **Serialize with:** C1/P3 on `tests/engine.test.ts` (single owner — land after C1 or stack on its branch); no P2 conflict (P1 never touches `prove.ts`)
 
 > **Contract:** opt-in per-scenario, **per-direction** semantic budgets,
 > evaluated against the **uncompacted** plan artifact, speaking the derived
@@ -61,7 +61,10 @@ no `summarizeActions` on the public surface. P2 owns prove API changes.
    `produces`/`destroys` StableId sets), and renames emit as `alter`. The
    budget helper must therefore define derived predicates over the action
    list: **replacement(K)** = a `drop` and a `create` whose `destroys`/
-   `produces` contain the same-kind (and same-name-path) StableId;
+   `produces` contain the **same StableId by exact `encodeId(...)` equality**
+   — identity fields beyond names (routine signatures, ACL columns) are part
+   of the id, and name-path matching would misclassify a dropped overload +
+   added overload as a replacement;
    **rename(K)** = an `alter` whose `produces` and `destroys` are both
    non-empty subtrees. Document the derivation in the helper — budget fixtures
    speak this derived vocabulary, never raw verbs.
@@ -101,8 +104,9 @@ no `summarizeActions` on the public surface. P2 owns prove API changes.
 
 ## Conflicts
 
-- **P2:** do not both rewrite `prove.ts` / `engine.test.ts` heavily — if P2 is
-  active, P1 owns only `budgets.ts` + corpus fixtures; P2 owns prove API.
+- **C1/P3:** `engine.test.ts` single owner — land after C1 or stack on its
+  branch.
+- **P2:** no conflict — P1 never touches `prove.ts`; P2 owns the prove API.
 - **I1:** avoid rename corpus churn while I1 open; pick non-rename scenarios.
 
 ## Done when

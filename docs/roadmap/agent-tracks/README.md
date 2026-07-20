@@ -80,7 +80,7 @@ authoritative order (notably: C1 preferably lands *before* I1).
 | V1 | I1, C1, P2 (plan / prove / apply / export) |
 | I1 | B1, V1, C1, H1; anyone on `role-rename-carry`, `change-set`, `action-emitter` |
 | C1 | C2, H1 (`internal.ts`); P1/P3 on `engine.test.ts` — **single owner**: C1 first, P1/P3 stack on its branch or land strictly before/after; V1/P2 only if `prove.ts` API touched |
-| P1 vs P2 | both heavy on `prove.ts` / engine harness — one owner or serialize |
+| P1 | C1/P3 on `engine.test.ts` (single owner — after C1 or stacked); **no P2 conflict** — P1 never touches `prove.ts` |
 | P3 vs P2 | P3's `autoSeedEmptyTables` touch vs P2 owning `prove.ts` — serialize |
 | D0, I2 | almost nothing |
 
@@ -220,6 +220,19 @@ Fifth pass (2026-07-21), editorial residue from pass 4 + one design forcing:
 32. **Rejected** — reviewer claim that `tests/cli.test.ts` doesn't exist:
     false, the file exists (59.7K). First fully wrong checkable claim across
     five review rounds; everything else was verified before adoption.
+    (Reviewer later confirmed the correction: truncated search output.)
+
+Sixth pass (2026-07-21) — final editorial round; **review closed, delegate**:
+
+33. **P1** — replacement predicate pinned to exact `encodeId(...)` equality
+    (name-path matching would misclassify routine overloads); stale
+    "serialize with P2 on `prove.ts`" clauses removed everywhere — P1 never
+    touches `prove.ts` (matrix updated to match).
+34. **OVERVIEW** — ship-order diagram now orders P1 after C1 (matching the
+    single-owner rule); C1's "Today" row corrected: the compact artifact IS
+    proven today — the uncovered risk is compaction masking a broken
+    **uncompacted** plan and `--no-compact` users applying a never-proven
+    shape.
 
 ## Conventions for every agent
 

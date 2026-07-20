@@ -18,23 +18,25 @@ the wrong reason, or crashes on a rename Postgres itself handles fine.
 
 ```mermaid
 flowchart TB
-  subgraph today ["Today — sound core, leaky seams"]
-    E[Extract / FactBase] --> V["Managed view<br/>(open-coded ×4)"]
+  subgraph today [Today: sound core, leaky seams]
+    E[Extract / FactBase] --> V[Managed view - open-coded x4]
     V --> D[Diff]
-    D --> P["Plan + carry folklore<br/>+ compaction"]
+    D --> P[Plan + carry folklore + compaction]
     P --> R[Prove convergence]
-    R -.->|sometimes hides| X["Policy bugs · empty-table<br/>data proof · rename cycles"]
+    R -.->|sometimes hides| X[Policy bugs / empty-table data proof / rename cycles]
   end
 
-  subgraph after ["After the tracks — same core, sealed seams"]
-    E2[Extract / FactBase] --> V2["reconstructManagedView<br/>(one helper)"]
-    V2 --> N["Rename normalize<br/>(canonical ids)"]
+  R --> BRIDGE[B1 V1 C1 I1 P-tracks]
+
+  subgraph after [After the tracks: same core, sealed seams]
+    E2[Extract / FactBase] --> V2[reconstructManagedView - one helper]
+    V2 --> N[Rename normalize - canonical ids]
     N --> D2[Diff]
-    D2 --> P2["Plan (no carry)<br/>+ optional pretty compact"]
-    P2 --> R2["Prove both shapes<br/>+ budgets + audit + seeds"]
+    D2 --> P2[Plan no carry + optional pretty compact]
+    P2 --> R2[Prove both shapes + budgets + audit + seeds]
   end
 
-  today -->|"B1 · V1 · C1 · I1 · P*"| after
+  BRIDGE --> E2
 ```
 
 ---
@@ -42,29 +44,38 @@ flowchart TB
 ## Ship order (what lands when)
 
 ```mermaid
-gantt
-  title Suggested landing order (conflict-safe)
-  dateFormat X
-  axisFormat %s
+flowchart LR
+  subgraph w01 [Wave 0-1]
+    D0n[D0 docs]
+    B1n[B1 crash fix]
+    V1n[V1 seal view]
+    P3n[P3 autoSeed]
+  end
 
-  section Wave 0-1
-  D0 docs honesty           :d0, 0, 1
-  B1 rename×policy crash    :b1, 0, 2
-  V1 seal managed view      :v1, 0, 2
-  P3 autoSeed observability :p3, 0, 2
+  subgraph w2 [After V1]
+    C1n[C1 dual-prove]
+    P1n[P1 budgets]
+    P2an[P2a attribution]
+  end
 
-  section After V1
-  C1 dual-prove compact     :c1, 2, 3
-  P1 action budgets         :p1, 2, 3
-  P2a attribution plumbing  :p2a, 2, 3
+  subgraph w3 [Identity]
+    I1an[I1a normalizer]
+    I1bn[I1b integrate]
+  end
 
-  section Identity
-  I1a normalizer dark       :i1a, 3, 4
-  I1b wire + delete carry   :i1b, 4, 5
+  subgraph w4 [Later]
+    P2bn[P2b prove/CLI]
+    C2H1[C2 / H1 polish]
+  end
 
-  section Later
-  P2b prove/CLI audit       :p2b, 3, 5
-  C2 / H1 polish            :later, 5, 6
+  V1n --> C1n
+  C1n --> P1n
+  V1n --> I1an
+  B1n --> I1bn
+  C1n --> I1bn
+  I1an --> I1bn
+  P2an --> P2bn
+  I1bn --> C2H1
 ```
 
 | Step | Track(s) | One-line win |
@@ -107,7 +118,7 @@ These tracks fix how we **project, rename, pretty-print, and prove** — not tha
 
 ## Step-by-step: broken → fixed
 
-### Step 1a — B1: role rename × policy cycle
+### Step 1a — B1: role rename x policy cycle
 
 **ELI5:** Renaming a user while a door-pass still has their old name written on
 it makes the recipe writer freeze (“do the rename first / do the pass first”).
@@ -118,17 +129,17 @@ dependency graph. Carry never sees `policy.roles` (payload, not StableId).
 
 ```mermaid
 flowchart LR
-  subgraph broken ["❌ Today"]
-    R1["ALTER ROLE a → b<br/>produces b, destroys a"]
-    P1["ALTER POLICY … TO b<br/>consumes b, releases a"]
-    R1 -->|"must before"| P1
-    P1 -->|"must before"| R1
+  subgraph broken [BROKEN today]
+    R1["ALTER ROLE a RENAME TO b<br/>produces b, destroys a"]
+    P1["ALTER POLICY TO b<br/>consumes b, releases a"]
+    R1 -->|must before| P1
+    P1 -->|must before| R1
   end
 
-  subgraph fixed ["✅ After B1"]
-    R2["ALTER ROLE a → b"]
-    P2["ALTER POLICY … TO b"]
-    R2 -->|"rename first<br/>(carve-out)"| P2
+  subgraph fixed [FIXED after B1]
+    R2["ALTER ROLE a RENAME TO b"]
+    P2["ALTER POLICY TO b"]
+    R2 -->|rename first - carve-out| P2
   end
 ```
 
@@ -165,19 +176,19 @@ open-coded in plan / prove / apply / export.
 
 ```mermaid
 flowchart TB
-  subgraph before_v1 ["❌ Four copies"]
+  subgraph before_v1 [BROKEN: four copies]
     CS[change-set.ts]
     PR[prove.ts]
     AP[apply.ts]
     EX[schema-export.ts]
-    CS --> RV1[resolveView → scope]
-    PR --> RV2[resolveView → scope]
-    AP --> RV3[resolveView → scope]
-    EX --> RV4[resolveView → scope]
+    CS --> RV1[resolveView then scope]
+    PR --> RV2[resolveView then scope]
+    AP --> RV3[resolveView then scope]
+    EX --> RV4[resolveView then scope]
   end
 
-  subgraph after_v1 ["✅ One helper"]
-    H["reconstructManagedView()"]
+  subgraph after_v1 [FIXED: one helper]
+    H[reconstructManagedView]
     CS2[change-set] --> H
     PR2[prove] --> H
     AP2[apply] --> H
@@ -208,17 +219,17 @@ stronger path.
 
 ```mermaid
 flowchart LR
-  subgraph before_p3 ["❌ Weak data proof"]
-    T1[Empty table] --> M1["contentMode: none"]
-    M1 --> OK1[Prove ok ✅]
-    S1[Seed INSERT fails] --> C1["catch {}"]
+  subgraph before_p3 [BROKEN: weak data proof]
+    T1[Empty table] --> M1[contentMode none]
+    M1 --> OK1[Prove ok]
+    S1[Seed INSERT fails] --> C1[empty catch]
     C1 --> OK1
   end
 
-  subgraph after_p3 ["✅ Observable seeds"]
+  subgraph after_p3 [FIXED: observable seeds]
     T2[Empty table] --> SEED[autoSeed in CI]
-    SEED --> M2[fingerprint / count]
-    FAIL[INSERT fails] --> TAX["skipped vs failed<br/>SQLSTATE + allowlist"]
+    SEED --> M2[fingerprint or count]
+    FAIL[INSERT fails] --> TAX[skipped vs failed - SQLSTATE allowlist]
     TAX --> REPORT[Prove reports it]
   end
 ```
@@ -232,7 +243,7 @@ flowchart LR
 
 ---
 
-### Step 2 — C1: dual-prove compact ∥ uncompact
+### Step 2 — C1: dual-prove compact and uncompact
 
 **ELI5:** There are two ways to write the recipe — short (pretty) and long
 (explicit). We only checked the short one. Maybe the long one is the only one
@@ -244,14 +255,14 @@ either shape depending on flags/defaults).
 
 ```mermaid
 flowchart TB
-  FB[Same source → desired] --> Ptrue["plan compact:true"]
-  FB --> Pfalse["plan compact:false"]
-  Ptrue --> A1[apply + prove]
-  Pfalse --> A2[apply + prove]
+  FB[Same source and desired] --> Ptrue[plan compact true]
+  FB --> Pfalse[plan compact false]
+  Ptrue --> A1[apply and prove]
+  Pfalse --> A2[apply and prove]
   A1 --> G{both green?}
   A2 --> G
   G -->|yes| PASS[Compaction is optional pretty]
-  G -->|no| FAIL[Harness fails — elision was load-bearing]
+  G -->|no| FAIL[Harness fails - elision was load-bearing]
 ```
 
 **Concrete example**
@@ -268,7 +279,7 @@ Compacted (pretty):
 
 | | Behavior |
 |---|---|
-| **Today** | Corpus proves one artifact (default compact on). A bad elision can stay green |
+| **Today** | Corpus proves only the **compact** artifact — an elision that breaks it fails now, but compaction can **mask a broken uncompacted plan**, and `--no-compact` users apply a never-proven shape |
 | **After C1** | Every scenario × direction builds **two** plans and proves/applies each (with role teardown between modes) |
 
 ---
@@ -284,9 +295,9 @@ the **uncompacted** artifact using derived predicates (`replacement(K)`,
 
 ```mermaid
 flowchart LR
-  PLAN[Uncompacted plan] --> PRED{"replacement(table)<br/>or rename(role)?"}
-  PRED -->|forbidden by budget.json| RED[Corpus FAIL]
-  PRED -->|allowed / absent| GREEN[OK]
+  PLAN[Uncompacted plan] --> PRED{replacement or rename?}
+  PRED -->|forbidden by budget| RED[Corpus FAIL]
+  PRED -->|allowed or absent| GREEN[OK]
 ```
 
 **Concrete example**
@@ -323,13 +334,13 @@ sequenceDiagram
   participant Diff as Canonical diff
   participant Em as Action emitter
 
-  S->>Diff: discovery diff (+ filter)
-  D->>Diff: discovery diff (+ filter)
-  Diff->>Em: acceptedRenames (keep pre-rewrite from-facts)
+  S->>Diff: discovery diff plus filter
+  D->>Diff: discovery diff plus filter
+  Diff->>Em: acceptedRenames keep pre-rewrite from-facts
   Note over S,N: physicalSource fingerprint recorded HERE
-  S->>N: rewrite ids/edges/payloads → new names
-  D->>N: rewrite → new names
-  N->>Diff: canonical diff (continuity, no churn)
+  S->>N: rewrite ids edges payloads to new names
+  D->>N: rewrite to new names
+  N->>Diff: canonical diff continuity no churn
   Diff->>Em: remaining actions
   Em->>Em: synthesize RENAME from acceptedRenames
 ```
@@ -365,9 +376,9 @@ acknowledged/suspicious, computed at **plan** time (prove has no raw FB).
 flowchart TB
   RAW[Post-extract catalog] --> PROJ[Projection stages]
   PROJ --> MV[Managed view]
-  PROJ --> AUD["Suppression records<br/>stage · reasonCode · viaDescendantOf"]
+  PROJ --> AUD[Suppression records: stage, reasonCode, viaDescendantOf]
   MV --> PROOF[Managed proof]
-  AUD --> CLASS{acknowledged<br/>vs suspicious?}
+  AUD --> CLASS{acknowledged or suspicious?}
   CLASS -->|acknowledged| QUIET[Expected platform noise]
   CLASS -->|suspicious| ALERT[Surface in prove/CLI]
 ```
@@ -388,29 +399,33 @@ GRANT still name that role. Apply with Supabase profile. Trust the proof.
 
 ```mermaid
 flowchart TB
-  subgraph T0 ["Today"]
+  subgraph T0 [Today]
     A0[Plan] -->|often| CRASH[Cycle or noisy REVOKE/GRANT]
     A0 -->|if lucky| PROVE0[Prove green]
     PROVE0 --> Q0[Did we seed? Did policy hide something?]
   end
 
-  subgraph T1 ["After B1 + V1"]
+  Q0 --> A1
+
+  subgraph T1 [After B1 and V1]
     A1[Plan] --> OK1[Ordered plan, shared view helper]
     OK1 --> PROVE1[Prove]
   end
 
-  subgraph T2 ["After C1 + P3 + P1"]
+  PROVE1 --> A2
+
+  subgraph T2 [After C1 P3 P1]
     A2[Two artifacts proved]
     SEED[Seeds observed]
     BUD[Shape budgets optional]
   end
 
-  subgraph T3 ["After I1 + P2"]
-    A3["Clean rename plan<br/>no carry"]
-    AUD[Projection audit]
-  end
+  A2 --> A3
 
-  T0 --> T1 --> T2 --> T3
+  subgraph T3 [After I1 and P2]
+    A3[Clean rename plan - no carry]
+    AUD2[Projection audit]
+  end
 ```
 
 | Milestone | What the user/dev feels |
@@ -428,20 +443,20 @@ flowchart TB
 ## What we are *not* changing
 
 ```mermaid
-mindmap
-  root((Unchanged bets))
-    Postgres elaborates
-      live + shadow extract
-      no AST in diff path
-    Fact grain
-      one granularity
-      edges from pg_depend
-    Generic diff
-      add/remove/set/link/unlink
-    Rule table
-      per-kind emission knowledge
-    Proof harness
-      corpus remains the oracle
+flowchart TB
+  ROOT[Unchanged bets]
+  ROOT --> A[Postgres elaborates]
+  A --> A1[live + shadow extract]
+  A --> A2[no AST in diff path]
+  ROOT --> B[Fact grain]
+  B --> B1[one granularity]
+  B --> B2[edges from pg_depend]
+  ROOT --> C[Generic diff]
+  C --> C1[add remove set link unlink]
+  ROOT --> D[Rule table]
+  D --> D1[per-kind emission knowledge]
+  ROOT --> E[Proof harness]
+  E --> E1[corpus remains the oracle]
 ```
 
 ---
