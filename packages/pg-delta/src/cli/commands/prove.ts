@@ -15,6 +15,8 @@ import { makePool } from "../pool.ts";
 import { CliExit, parseFlags, UsageError } from "../flags.ts";
 import {
   effectiveProfileId,
+  isProfilePath,
+  loadProfile,
   PROFILE_IDS,
   reconcileBaselineDigest,
   resolveCliProfile,
@@ -109,8 +111,11 @@ export async function cmdProve(args: string[]): Promise<void> {
 
   const json = readFileSync(planPath, "utf8");
   const thePlan = parsePlan(json);
-  const { factBase: desiredFb, redactSecrets: snapshotRedactSecrets } =
-    loadSnapshot(snapshotPath);
+  const {
+    factBase: desiredFb,
+    redactSecrets: snapshotRedactSecrets,
+    profile: snapshotProfile,
+  } = loadSnapshot(snapshotPath);
   // Drift parity (PR #338 comment 3603601155): `drift` already surfaces its
   // snapshot's diagnostics (src/cli/commands/drift.ts) — `prove`'s desired
   // snapshot can carry the same kind (e.g. a skipped-as-unreadable user
@@ -150,6 +155,29 @@ export async function cmdProve(args: string[]): Promise<void> {
     flags["profile"],
     thePlan.profile?.id,
   );
+
+  // The desired snapshot must ALSO have been captured under that profile, or the
+  // proof reconstructs a different managed view than it diffed (the re-extract
+  // runs different handlers than the snapshot's facts were produced with).
+  // Reject a mismatch up front — before the clone is opened/mutated — mirroring
+  // the redaction-mode guard above. A `null` stamp = captured raw (reconciled as
+  // "raw"); an ABSENT stamp is a pre-stamping legacy snapshot and is exempt.
+  const resolvedDeclaredId =
+    profileId !== undefined && isProfilePath(profileId)
+      ? loadProfile(profileId).id
+      : profileId;
+  const snapshotDeclaredId = snapshotProfile === null ? "raw" : snapshotProfile;
+  if (
+    snapshotDeclaredId !== undefined &&
+    resolvedDeclaredId !== undefined &&
+    snapshotDeclaredId !== resolvedDeclaredId
+  ) {
+    throw new UsageError(
+      `prove: the desired snapshot was captured under profile "${snapshotDeclaredId}", but the plan/prove ` +
+        `profile resolves to "${resolvedDeclaredId}". A proof must compare against a snapshot captured with the ` +
+        `same profile — re-capture the snapshot with a matching --profile, or prove with the snapshot's profile.`,
+    );
+  }
 
   const clone = makePool(cloneUrl);
   try {

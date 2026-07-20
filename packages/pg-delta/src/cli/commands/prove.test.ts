@@ -8,7 +8,18 @@
  * formatter must surface every failure category, mirroring the corpus runner.
  */
 import { describe, expect, test } from "bun:test";
-import { formatProofFailure, formatProofPassCaveat } from "./prove.ts";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  cmdProve,
+  formatProofFailure,
+  formatProofPassCaveat,
+} from "./prove.ts";
+import { buildFactBase } from "../../core/fact.ts";
+import { serializeSnapshot } from "../../core/snapshot.ts";
+import { ENGINE_VERSION } from "../../plan/plan.ts";
+import { UsageError } from "../flags.ts";
 import type { ProofVerdict } from "../../proof/prove.ts";
 
 const baseVerdict = (): ProofVerdict => ({
@@ -59,5 +70,67 @@ describe("formatProofPassCaveat (PR #338 comment 3603601155, drift parity)", () 
     expect(formatProofPassCaveat(3)).toBe(
       " (3 diagnostics on the desired snapshot — see above)",
     );
+  });
+});
+
+describe("cmdProve — desired-snapshot profile reconciliation", () => {
+  const fb = buildFactBase(
+    [{ id: { kind: "schema", name: "public" }, payload: {} }],
+    [],
+  );
+
+  function writeArtifacts(
+    planProfileId: string,
+    snapshotProfile: string | null,
+  ): { planPath: string; snapPath: string } {
+    const dir = mkdtempSync(join(tmpdir(), "pgdelta-prove-prof-"));
+    const planPath = join(dir, "plan.json");
+    const snapPath = join(dir, "desired.json");
+    // a minimal, parse-valid plan artifact stamping the plan's profile id
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        formatVersion: 1,
+        engineVersion: ENGINE_VERSION,
+        actions: [],
+        deltas: [],
+        renameCandidates: [],
+        safetyReport: { level: "safe", findings: [] },
+        redactSecrets: true,
+        profile: { id: planProfileId },
+        source: { fingerprint: "aaa" },
+        target: { fingerprint: "bbb" },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      snapPath,
+      serializeSnapshot(fb, { pgVersion: "17.6", profile: snapshotProfile }),
+      "utf8",
+    );
+    return { planPath, snapPath };
+  }
+
+  test("a desired snapshot captured under a DIFFERENT profile fails closed before touching the clone", async () => {
+    // plan produced under raw, snapshot captured under supabase → the proof
+    // would compare a different managed view; reject up front (UsageError), so
+    // the clone URL is never even opened.
+    const { planPath, snapPath } = writeArtifacts("raw", "supabase");
+    let error: unknown;
+    try {
+      await cmdProve([
+        "--plan",
+        planPath,
+        "--clone",
+        "postgres://invalid.invalid:1/none",
+        "--desired-snapshot",
+        snapPath,
+      ]);
+    } catch (e) {
+      error = e;
+    }
+    // fails closed with a UsageError, NOT a connection error — the guard runs
+    // before makePool opens the clone.
+    expect(error).toBeInstanceOf(UsageError);
   });
 });

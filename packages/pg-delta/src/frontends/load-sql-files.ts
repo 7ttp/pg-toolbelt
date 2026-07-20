@@ -370,9 +370,20 @@ export function findMatchingStatements(
  *  not the declarative source's to manage in that scope. Membership grants are
  *  distinguished from privilege grants by the absence of an `ON` target. */
 const CLUSTER_DDL_RULES: { re: RegExp; label: string }[] = [
-  { re: /^\s*create\s+(role|user|group)\b/i, label: "CREATE ROLE" },
-  { re: /^\s*alter\s+(role|user|group)\b/i, label: "ALTER ROLE" },
-  { re: /^\s*drop\s+(role|user|group)\b/i, label: "DROP ROLE" },
+  // `user(?!\s+mapping)` so `CREATE|ALTER|DROP USER MAPPING …` (a database-local
+  // FDW object, emitted by src/plan/rules/foreign.ts) is NOT misclassified as
+  // cluster-global role DDL — otherwise database-scope apply would reject them
+  // (or --skip-cluster-ddl would strip them) from pg-delta's own exports. `\s+`
+  // matches any whitespace run in the masked/normalized statement text.
+  {
+    re: /^\s*create\s+(role|user(?!\s+mapping)|group)\b/i,
+    label: "CREATE ROLE",
+  },
+  {
+    re: /^\s*alter\s+(role|user(?!\s+mapping)|group)\b/i,
+    label: "ALTER ROLE",
+  },
+  { re: /^\s*drop\s+(role|user(?!\s+mapping)|group)\b/i, label: "DROP ROLE" },
   { re: /^\s*comment\s+on\s+role\b/i, label: "COMMENT ON ROLE" },
   {
     re: /^\s*security\s+label\b[\s\S]*\bon\s+role\b/i,
