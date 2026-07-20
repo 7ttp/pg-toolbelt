@@ -7,6 +7,7 @@ import {
   byteLength,
   clipToByteLength,
   compositeUserColumns,
+  dependencyConsumes,
   isSubsequence,
   p,
   renameRule,
@@ -460,7 +461,7 @@ export const typeRules: Record<string, KindRules> = {
     },
     attributes: {
       type: {
-        alter: (fact, _from, to, view) => {
+        alter: (fact, _from, to, view, sourceView) => {
           const id = fact.id as { schema: string; type: string; name: string };
           const typeId: StableId = {
             kind: "type",
@@ -472,9 +473,24 @@ export const typeRules: Record<string, KindRules> = {
               `composite type ${rel(id.schema, id.type)}: cannot change attribute "${id.name}" type while the type is used by table columns — PostgreSQL forbids ALTER ATTRIBUTE … TYPE on an in-use composite. Drop the using columns, or recreate the type, first.`,
             );
           }
-          return {
+          // A composite attribute's type dependency is extracted onto the
+          // enclosing `type` fact, not this `typeAttribute` child (see the
+          // `comptype` CTE in extract/dependencies.ts). When the composite is
+          // only being retyped (not dropped/created) its own actions never
+          // fire, so — mirroring the ALTER COLUMN … TYPE fix in tables.ts —
+          // release the OLD referenced types (source side) so this alter runs
+          // BEFORE their same-plan DROP, and consume the NEW ones (target side)
+          // so it runs AFTER their same-plan CREATE. The edges are keyed to the
+          // parent type fact; over-scoping to a sibling attribute's still-used
+          // type is harmless (nothing drops it → no ordering edge is added).
+          const consumes = dependencyConsumes(view, typeId);
+          const releases = dependencyConsumes(sourceView, typeId);
+          const spec: ActionSpec = {
             sql: `ALTER TYPE ${rel(id.schema, id.type)} ALTER ATTRIBUTE ${qid(id.name)} TYPE ${str(to)} CASCADE`,
           };
+          if (consumes.length > 0) spec.consumes = consumes;
+          if (releases.length > 0) spec.releases = releases;
+          return spec;
         },
       },
       // a collation-only change has no in-place form; replace the attribute
