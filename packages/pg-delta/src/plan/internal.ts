@@ -311,6 +311,13 @@ export function actionTieKey(
   // weight (via the profile's intent rules) rather than the accidental 99
   // catch-fallback. Defaults to the no-intent resolver for direct callers/tests.
   rulesForId: RulesForId = defaultRulesForId,
+  // Optional per-action override for the SUBJECT segment of the key. The
+  // ordering phase uses it to sort a table's ADD COLUMN creates by declared
+  // column position (pg_attribute.attnum) instead of column NAME, so from-empty
+  // CREATEs (and the folds that collapse them into the CREATE parens) render
+  // columns in declared order. Returns undefined to fall back to the encoded
+  // subject id (every other action is unaffected).
+  subjectKeyOf?: (subject: StableId, action: Action) => string | undefined,
 ): string {
   const action = actions[i] as Action;
   const subject =
@@ -325,7 +332,10 @@ export function actionTieKey(
   })();
   const phase = action.verb === "drop" ? "0" : "1";
   const w = action.verb === "drop" ? 99 - weight : weight;
-  return `${phase}|${String(w).padStart(2, "0")}|${subject ? encodeId(subject) : ""}|${String(i).padStart(6, "0")}`;
+  const subjectKey =
+    (subject !== undefined ? subjectKeyOf?.(subject, action) : undefined) ??
+    (subject ? encodeId(subject) : "");
+  return `${phase}|${String(w).padStart(2, "0")}|${subjectKey}|${String(i).padStart(6, "0")}`;
 }
 
 /**

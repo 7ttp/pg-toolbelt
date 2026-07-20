@@ -4,6 +4,8 @@ import { encodeId, type StableId } from "../../core/stable-id.ts";
 import { lit, qid, rel } from "../render.ts";
 import type { ActionSpec, KindRules } from "../rules.ts";
 import {
+  byteLength,
+  clipToByteLength,
   compositeUserColumns,
   isSubsequence,
   p,
@@ -286,22 +288,61 @@ export const typeRules: Record<string, KindRules> = {
               `enum ${relName}: cannot remove or reorder values while non-column object(s) depend on it — ${deps}. The rebuild drops the old enum, which those objects still reference, and PostgreSQL forbids dropping a type in use. Migrating a DOMAIN / COMPOSITE / RANGE that uses an enum across a value-set change is not supported yet; drop the dependent object(s), or recreate them, first.`,
             );
           }
-          // a deterministic temp name that cannot collide with an existing
-          // type in the schema (bump a counter past any occupant)
+          // A deterministic temp name for the old enum, RENAMEd aside before the
+          // new value set is created. It must collide with NO occupant of the
+          // type namespace (pg_type) visible in the fact base — not only managed
+          // enum/composite/range `type` facts, but DOMAINS and the implicit row
+          // type every relation (table / view / matview / foreign table /
+          // sequence) registers in pg_type under its own name. Checking only
+          // `type` facts let a table (or domain) named `<enum>__pgdelta_replaced`
+          // slip through, so the initial `ALTER TYPE … RENAME TO` failed at apply
+          // with "type … already exists".
+          const OCCUPANT_KINDS = [
+            "type",
+            "domain",
+            "table",
+            "view",
+            "materializedView",
+            "foreignTable",
+            "sequence",
+          ] as const;
           const taken = (n: string): boolean =>
-            view.get({
-              kind: "type",
-              schema: id.schema,
-              name: n,
-            } as StableId) !== undefined ||
-            sourceView.get({
-              kind: "type",
-              schema: id.schema,
-              name: n,
-            } as StableId) !== undefined;
-          let tmp = `${id.name}__pgdelta_replaced`;
-          for (let n = 2; taken(tmp); n++)
-            tmp = `${id.name}__pgdelta_replaced_${n}`;
+            OCCUPANT_KINDS.some(
+              (kind) =>
+                view.get({ kind, schema: id.schema, name: n } as StableId) !==
+                  undefined ||
+                sourceView.get({
+                  kind,
+                  schema: id.schema,
+                  name: n,
+                } as StableId) !== undefined,
+            );
+          // Length-safe: PostgreSQL clips identifiers to NAMEDATALEN-1 (63)
+          // BYTES, so a long enum name + suffix would be truncated by the server
+          // and could land back on an occupied name (a 63-byte enum whose temp
+          // truncates to the ORIGINAL name → RENAME to itself). Clip the base
+          // ourselves so the whole identifier stays ≤ 63 bytes and is stored
+          // verbatim; `taken` then guarantees uniqueness. Deterministic: same
+          // enum name + same fact base → same temp name.
+          const MAX_IDENT_BYTES = 63;
+          const REPLACED_SUFFIX = "__pgdelta_replaced";
+          const buildTmp = (n: number | null): string => {
+            const numeric = n === null ? "" : `_${n}`;
+            const budget =
+              MAX_IDENT_BYTES -
+              byteLength(REPLACED_SUFFIX) -
+              byteLength(numeric);
+            return `${clipToByteLength(id.name, budget)}${REPLACED_SUFFIX}${numeric}`;
+          };
+          let tmp = buildTmp(null);
+          for (let n = 2; taken(tmp); n++) {
+            if (n > 10_000) {
+              throw new Error(
+                `enum ${relName}: could not find a free temp name for the value-set rebuild after 10000 attempts — an extraordinary number of \`${REPLACED_SUFFIX}\`-suffixed occupants exist in schema "${id.schema}"`,
+              );
+            }
+            tmp = buildTmp(n);
+          }
           const specs: ActionSpec[] = [
             { sql: `ALTER TYPE ${relName} RENAME TO ${qid(tmp)}` },
             {

@@ -10,6 +10,32 @@ import { encodeId, type StableId } from "../../core/stable-id.ts";
 import { grantTarget, qid, rel, splitOption } from "../render.ts";
 import type { ActionSpec, FactView } from "../rules.ts";
 
+const TEXT_ENCODER = new TextEncoder();
+
+/** UTF-8 byte length of a string. Runtime-agnostic (no `Buffer`), so it works
+ *  identically in Bun / Node / Deno — used where PostgreSQL's byte-based
+ *  identifier limit (NAMEDATALEN) matters, not the JS UTF-16 code-unit length. */
+export function byteLength(s: string): number {
+  return TEXT_ENCODER.encode(s).length;
+}
+
+/** Clip `s` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a code point, so
+ *  the result is an identifier PostgreSQL will store verbatim (never itself
+ *  truncate). Iterates by code point (`for…of`), never by UTF-16 unit. */
+export function clipToByteLength(s: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (byteLength(s) <= maxBytes) return s;
+  let out = "";
+  let used = 0;
+  for (const ch of s) {
+    const chBytes = byteLength(ch);
+    if (used + chBytes > maxBytes) break;
+    out += ch;
+    used += chBytes;
+  }
+  return out;
+}
+
 /** Most renames are `<ALTER prefix> RENAME TO <new name>`. */
 export function renameRule(
   alterPrefix: (fact: Fact) => string,

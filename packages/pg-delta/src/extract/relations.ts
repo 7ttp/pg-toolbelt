@@ -101,6 +101,7 @@ export async function extractColumns(ctx: ExtractContext): Promise<void> {
   // ── columns + defaults (defaults are their own facts, like pg_attrdef) ─
   for (const row of await q(`
     SELECT n.nspname AS schema, c.relname AS table, a.attname AS name,
+           a.attnum AS position,
            c.relkind AS table_kind,
            format_type(a.atttypid, a.atttypmod) AS type,
            a.attnotnull AS not_null,
@@ -165,6 +166,18 @@ export async function extractColumns(ctx: ExtractContext): Promise<void> {
         id: columnId,
         parent: tableId,
         payload: {
+          // `_position` is the declared column position (pg_attribute.attnum).
+          // Column ORDER is row-layout state (SELECT *, positional INSERT, the
+          // relation's row type), so a from-empty CREATE must render columns in
+          // this order — but positional IDENTITY is not desired state (columns
+          // are name-keyed, like composite attributes), so the `_`-prefix
+          // excludes it from the hash and diff (core/hash.ts, core/diff.ts): an
+          // order-only reshuffle on an EXISTING table stays undiffable by design.
+          // attnum has HOLES after DROP COLUMN, but ordering the survivors by it
+          // still yields their declared order, which is what matters. The plan's
+          // ordering phase (plan/phases/action-graph.ts) and the partitioned
+          // inline-column path (plan/rules/tables.ts) render in this order.
+          _position: Number(row["position"]),
           type: String(row["type"]),
           notNull: Boolean(row["not_null"]),
           identity:
