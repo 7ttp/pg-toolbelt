@@ -24,7 +24,7 @@ import {
 
 /** Engine version stamped into plan artifacts; apply refuses artifacts
  *  from an engine it does not understand (stage 6 deliverable 1). */
-export const ENGINE_VERSION = "0.1.0";
+export const ENGINE_VERSION = "0.2.0";
 
 export interface Action {
   sql: string;
@@ -508,7 +508,14 @@ export function plan(
     engineVersion: ENGINE_VERSION,
     source: { fingerprint: source.rootHash },
     target: { fingerprint: projectedDesired.rootHash },
-    preamble: [{ name: "check_function_bodies", value: "off" }],
+    preamble: [
+      // Pin the applier's deparse/resolution path to `pg_catalog` so the
+      // rendered (fully qualified) DDL resolves identically regardless of the
+      // applier role's default search_path. Extraction canonicalizes to the
+      // same path, so every emitted statement target is already qualified.
+      { name: "search_path", value: "pg_catalog" },
+      { name: "check_function_bodies", value: "off" },
+    ],
     deltas,
     filteredDeltas,
     ...(options?.policy ? { policy: options.policy } : {}),

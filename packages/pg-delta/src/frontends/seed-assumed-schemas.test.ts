@@ -311,7 +311,9 @@ describe("deriveAssumedSchemaSeed", () => {
       assumedRoles: ["admin", "reader"],
     });
     expect(seed.sql).toMatchInlineSnapshot(`
-      "SET check_function_bodies = off;
+      "SET search_path = pg_catalog;
+
+      SET check_function_bodies = off;
 
       CREATE SCHEMA "platform";
 
