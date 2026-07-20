@@ -224,4 +224,25 @@ describe.skipIf(skipSeclabelProof)("security-label end-to-end proof", () => {
       diagnostics.some((d) => d.code === "unresolved_security_label"),
     ).toBe(true);
   }, 240_000);
+
+  test("a label on a VIEW COLUMN is reported, never a crash on a missing column parent", async () => {
+    const cluster = await seclabelCluster();
+    const db = await cluster.createDb("sl_viewcol");
+    dbs.push(db);
+    // View/matview columns produce NO column facts (relations.ts extracts columns
+    // only for relkinds r/p/f), but the label extractor pushed a securityLabel
+    // parented on that missing column fact for any objsubid > 0 → buildFactBase
+    // threw "references missing parent …column…", crashing extraction outright.
+    await db.pool.query(`
+      CREATE VIEW public.v AS SELECT 1 AS x;
+      SECURITY LABEL FOR 'dummy' ON COLUMN public.v.x IS 'secret';
+    `);
+    // RED before the fix: extract() throws instead of returning. After: the
+    // view-column label surfaces as a diagnostic (strict mode blocks, default
+    // warns), never a fact on a missing parent.
+    const { diagnostics } = await extract(db.pool);
+    expect(
+      diagnostics.some((d) => d.code === "unresolved_security_label"),
+    ).toBe(true);
+  }, 240_000);
 });

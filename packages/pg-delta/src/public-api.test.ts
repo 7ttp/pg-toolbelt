@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import * as root from "./index.ts";
 import * as integrations from "./integrations/index.ts";
+import * as planSubpath from "./plan/plan.ts";
 
 describe("public API surface", () => {
   test("root re-exports the headline profile API", () => {
@@ -32,6 +33,26 @@ describe("public API surface", () => {
     expect(integrations.SUPABASE_EXTENSION_HANDLERS).toContain(
       integrations.pgPartmanHandler,
     );
+  });
+
+  test("the ./plan subpath re-exports the plan-artifact helpers the docs name", () => {
+    // docs/getting-started.md imports { serializePlan, parsePlan } from
+    // "@supabase/pg-delta/plan"; that subpath maps to src/plan/plan.ts, so the
+    // helpers (which live in plan/artifact.ts) must be reachable there — not only
+    // from the package root. A round-trip proves the re-export is the real thing.
+    expect(typeof planSubpath.serializePlan).toBe("function");
+    expect(typeof planSubpath.parsePlan).toBe("function");
+  });
+
+  test("package.json declares the ./plan subpath export", () => {
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+      exports: Record<string, { bun: string; import: string; types: string }>;
+    };
+    const entry = pkg.exports["./plan"];
+    expect(entry).toBeDefined();
+    expect(entry?.bun).toBe("./src/plan/plan.ts");
+    expect(entry?.import).toBe("./dist/plan/plan.js");
   });
 
   test("package.json declares the ./integrations subpath export", () => {

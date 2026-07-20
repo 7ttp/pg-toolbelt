@@ -21,6 +21,12 @@ const LABELED_RELKINDS: Record<string, StableId["kind"]> = {
   f: "foreignTable",
 };
 
+/** pg_class relkinds that produce COLUMN facts (relations.ts extracts columns
+ *  only for these). A positive `objsubid` label on any OTHER relkind (a view,
+ *  matview, sequence, …) has no column fact to parent on, so it must NOT become a
+ *  fact — it is surfaced as an unresolved-label diagnostic instead. */
+const COLUMN_BEARING_RELKINDS = new Set(["r", "p", "f"]);
+
 /** classoids whose pg_seclabel rows the resolver turns into facts. The
  *  unresolved-label diagnostic flags any local label OUTSIDE this set (e.g. a
  *  label on a LANGUAGE, LARGE OBJECT, or a pg_class relkind we don't model). */
@@ -69,16 +75,24 @@ export async function extractSecurityLabels(
     const schema = String(row["schema"]);
     const relkind = String(row["relkind"]);
     if (Number(row["objsubid"]) > 0) {
-      pushSeclabel(
-        {
-          kind: "column",
-          schema,
-          table: String(row["name"]),
-          name: String(row["column"]),
-        },
-        String(row["provider"]),
-        String(row["label"]),
-      );
+      // A column label only resolves when the relation actually produces column
+      // facts (tables / partitioned tables / foreign tables). A label on a VIEW
+      // or matview column has no column fact to parent on; pushing it anyway made
+      // buildFactBase throw missing-parent and crash extraction. Skip it here —
+      // the unresolved-label diagnostic pass below reports it (strict mode blocks,
+      // default mode warns). The metadata-fidelity gap stays tracked in #332.
+      if (COLUMN_BEARING_RELKINDS.has(relkind)) {
+        pushSeclabel(
+          {
+            kind: "column",
+            schema,
+            table: String(row["name"]),
+            name: String(row["column"]),
+          },
+          String(row["provider"]),
+          String(row["label"]),
+        );
+      }
       continue;
     }
     const kind = LABELED_RELKINDS[relkind];
@@ -218,6 +232,9 @@ export async function extractSecurityLabels(
   const relkindList = Object.keys(LABELED_RELKINDS)
     .map((k) => `'${k}'`)
     .join(", ");
+  const columnRelkindList = [...COLUMN_BEARING_RELKINDS]
+    .map((k) => `'${k}'`)
+    .join(", ");
   for (const row of await q(`
       SELECT obj_class,
              count(*)::int AS count,
@@ -227,10 +244,12 @@ export async function extractSecurityLabels(
                sl.classoid::regclass::text || ' #' || sl.objoid::text AS descr
         FROM pg_seclabel sl
         WHERE NOT (
-          (sl.classoid = 'pg_class'::regclass AND (
-             sl.objsubid > 0
-             OR EXISTS (SELECT 1 FROM pg_class c
-                        WHERE c.oid = sl.objoid AND c.relkind IN (${relkindList}))))
+          (sl.classoid = 'pg_class'::regclass AND EXISTS (
+             SELECT 1 FROM pg_class c WHERE c.oid = sl.objoid AND (
+               -- a column label resolves only on a column-bearing relkind; a
+               -- view/matview column label is unresolved (no column fact)
+               (sl.objsubid > 0 AND c.relkind IN (${columnRelkindList}))
+               OR (sl.objsubid = 0 AND c.relkind IN (${relkindList})))))
           OR sl.classoid IN (${classoidList})
         )
         UNION ALL

@@ -26,6 +26,13 @@ import {
  *  from an engine it does not understand (stage 6 deliverable 1). */
 export const ENGINE_VERSION = "0.2.0";
 
+// The plan-artifact (JSON serialize/parse) helpers live in ./artifact.ts but are
+// part of this module's public surface: docs/getting-started.md imports them from
+// `@supabase/pg-delta/plan` (the subpath that maps here), so the documented path
+// must be real. Cycle-safe: artifact.ts's only import from this module is
+// ENGINE_VERSION, which it reads inside a function body, never at module-eval time.
+export { parsePlan, serializePlan } from "./artifact.ts";
+
 export interface Action {
   sql: string;
   verb: "create" | "alter" | "drop";
