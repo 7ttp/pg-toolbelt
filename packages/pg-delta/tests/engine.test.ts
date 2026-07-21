@@ -15,7 +15,9 @@ import { plan } from "../src/plan/plan.ts";
 import { probeApplierCapability } from "../src/policy/capability.ts";
 import { rel } from "../src/plan/render.ts";
 import { provePlan } from "../src/proof/prove.ts";
+import { enforceSeedCoverage, runPinnedDirection } from "./seed-coverage.ts";
 import { loadCorpus, type Scenario } from "./corpus.ts";
+import { mustRunSerially } from "./corpus-scheduling.ts";
 import {
   isolatedClusterPair,
   sharedCluster,
@@ -25,6 +27,8 @@ import { EXPECTED_RED } from "./expected-red.ts";
 
 async function proveOn(
   name: string,
+  scenarioName: string,
+  direction: "forward" | "reverse",
   clusterA: Cluster,
   clusterB: Cluster,
   fromSql: string,
@@ -74,7 +78,15 @@ async function proveOn(
         thePlan,
         clone.pool,
         desiredState.factBase,
+        {
+          // corpus-only flip (P3): the library default stays opt-in. Seeding every
+          // empty kept table gives the data-preservation proof teeth even for
+          // scenarios that ship no seed.sql; the coverage contract below then
+          // requires every non-seed to be an EXPECTED class-23 skip.
+          autoSeed: true,
+        },
       );
+      enforceSeedCoverage(scenarioName, direction, name, verdict);
       if (!verdict.ok) {
         const planText = thePlan.actions
           .map((a, i) => `  ${i}: ${a.sql}`)
@@ -124,7 +136,7 @@ async function runDirection(
   const [fromSql, toSql, seed] =
     direction === "forward"
       ? [scenario.a, scenario.b, scenario.seed]
-      : [scenario.b, scenario.a, undefined];
+      : [scenario.b, scenario.a, scenario.seedB];
   const label =
     direction === "forward" ? scenario.name : `${scenario.name}:reverse`;
 
@@ -138,7 +150,16 @@ async function runDirection(
       clusterB.listRoles(),
     ]);
     try {
-      await proveOn(label, clusterA, clusterB, fromSql, toSql, seed);
+      await proveOn(
+        label,
+        scenario.name,
+        direction,
+        clusterA,
+        clusterB,
+        fromSql,
+        toSql,
+        seed,
+      );
     } finally {
       await Promise.all([
         clusterA.dropRolesExcept(baseA),
@@ -152,7 +173,16 @@ async function runDirection(
   if (scenario.meta.minVersion !== undefined) {
     if ((await cluster.pgMajor()) < scenario.meta.minVersion) return;
   }
-  await proveOn(label, cluster, cluster, fromSql, toSql, seed);
+  await proveOn(
+    label,
+    scenario.name,
+    direction,
+    cluster,
+    cluster,
+    fromSql,
+    toSql,
+    seed,
+  );
 }
 
 async function runPinnedOrProve(
@@ -177,14 +207,9 @@ async function runPinnedOrProve(
     await runDirection(scenario, direction);
     return;
   }
-  try {
-    await runDirection(scenario, direction);
-  } catch {
-    return; // red as pinned — fine
-  }
-  throw new Error(
-    `${key} is pinned in EXPECTED_RED but now PASSES — remove the pin (tests/expected-red.ts)`,
-  );
+  // runPinnedDirection owns the pinned semantics (incl. the seed-coverage
+  // rethrow), so the guard is bound by seed-coverage.test.ts.
+  await runPinnedDirection(key, () => runDirection(scenario, direction));
 }
 
 // Live progress (opt-in via PGDELTA_NEXT_PROGRESS=1). `bun test` buffers its
@@ -246,16 +271,6 @@ const ALL_CASES: Case[] = CORPUS.flatMap((scenario) => [
 // collides ("role already exists", "duplicate key pg_authid", "cannot be
 // dropped"). Such cases (plus the explicitly cluster-level isolatedCluster ones)
 // run SERIALLY; only genuinely DB-local scenarios go in the concurrent pool.
-const ROLE_DDL = /\b(?:create|drop|alter)\s+(?:role|user|group)\b/i;
-function mustRunSerially(scenario: Scenario): boolean {
-  return (
-    scenario.meta.isolatedCluster === true ||
-    ROLE_DDL.test(scenario.a) ||
-    ROLE_DDL.test(scenario.b) ||
-    (scenario.seed !== undefined && ROLE_DDL.test(scenario.seed))
-  );
-}
-
 if (CONCURRENCY > 1) {
   describe("engine: corpus proof loop (concurrent)", () => {
     test(`all ${CORPUS_TOTAL} cases (concurrency=${CONCURRENCY})`, async () => {
