@@ -175,7 +175,6 @@ export function diffAggregates(
       changes.push(
         new CreateAggregate({ aggregate: branchAggregate, orReplace: true }),
       );
-      continue;
     }
 
     if (mainAggregate.owner !== branchAggregate.owner) {

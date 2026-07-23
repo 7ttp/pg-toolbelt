@@ -393,6 +393,93 @@ describe.concurrent("procedure.diff", () => {
     ).toBe("GRANT ALL ON FUNCTION public.fn1() TO PUBLIC");
   });
 
+  test("create or replace still emits a simultaneous PUBLIC EXECUTE revoke", () => {
+    const main = procedure({
+      source_code: "SELECT 1",
+      privileges: publicExecutePrivilege(),
+    });
+    const branch = procedure({
+      source_code: "SELECT 2",
+      definition:
+        "CREATE FUNCTION public.fn1() RETURNS int4 LANGUAGE sql AS $$SELECT 2$$",
+    });
+
+    const changes = diffProcedures(
+      contextWith(),
+      { [main.stableId]: main },
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes.some(
+        (change) =>
+          change instanceof CreateProcedure && change.orReplace === true,
+      ),
+    ).toBe(true);
+    expect(
+      changes
+        .find((change) => change instanceof RevokeProcedurePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.fn1() FROM PUBLIC");
+  });
+
+  test("default grant option downgrade keeps the base creation privilege", () => {
+    const defaultPrivilegeState = new DefaultPrivilegeState({});
+    defaultPrivilegeState.applyGrant("postgres", "f", null, "executor", [
+      { privilege: "EXECUTE", grantable: true },
+    ]);
+    defaultPrivilegeState.applyGrant("postgres", "f", null, "executor", [
+      { privilege: "EXECUTE", grantable: false },
+    ]);
+    defaultPrivilegeState.applyRevoke("postgres", "f", null, "executor", [
+      { privilege: "EXECUTE", grantable: true },
+    ]);
+    const branch = procedure();
+
+    const changes = diffProcedures(
+      contextWith({ defaultPrivilegeState }),
+      {},
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes
+        .find(
+          (change) =>
+            change instanceof RevokeProcedurePrivileges &&
+            change.grantee === "executor",
+        )
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.fn1() FROM executor");
+  });
+
+  test("additive defaults normalize duplicate privilege grant options", () => {
+    const defaultPrivilegeState = new DefaultPrivilegeState({});
+    defaultPrivilegeState.applyGrant("postgres", "f", null, "executor", [
+      { privilege: "EXECUTE", grantable: false },
+    ]);
+    defaultPrivilegeState.applyGrant("postgres", "f", "public", "executor", [
+      { privilege: "EXECUTE", grantable: true },
+    ]);
+    const branch = procedure();
+
+    const changes = diffProcedures(
+      contextWith({ defaultPrivilegeState }),
+      {},
+      { [branch.stableId]: branch },
+    );
+    const executorRevokes = changes.filter(
+      (change) =>
+        change instanceof RevokeProcedurePrivileges &&
+        change.grantee === "executor",
+    );
+
+    expect(executorRevokes).toHaveLength(1);
+    expect(executorRevokes[0]?.serialize()).toBe(
+      "REVOKE ALL ON FUNCTION public.fn1() FROM executor",
+    );
+  });
+
   test("self-contained create still models PostgreSQL's built-in PUBLIC EXECUTE baseline", () => {
     const branch = procedure();
     const changes = diffProcedures(

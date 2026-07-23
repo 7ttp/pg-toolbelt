@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { AlterRoleSetOptions } from "./changes/role.alter.ts";
 import { CreateRole } from "./changes/role.create.ts";
 import { DropRole } from "./changes/role.drop.ts";
-import { GrantRoleMembership } from "./changes/role.privilege.ts";
+import {
+  GrantRoleMembership,
+  RevokeRoleDefaultPrivileges,
+} from "./changes/role.privilege.ts";
 import { diffRoles } from "./role.diff.ts";
 import { Role, type RoleProps } from "./role.model.ts";
 
@@ -41,6 +44,34 @@ describe.concurrent("role.diff", () => {
       { [branch.stableId]: branch },
     );
     expect(changes[0]).toBeInstanceOf(AlterRoleSetOptions);
+  });
+
+  test("fully revokes a grantable default privilege", () => {
+    const main = new Role({
+      ...base,
+      default_privileges: [
+        {
+          in_schema: null,
+          objtype: "f",
+          grantee: "executor",
+          privileges: [{ privilege: "EXECUTE", grantable: true }],
+          is_implicit: false,
+        },
+      ],
+    });
+    const branch = new Role(base);
+
+    const changes = diffRoles(
+      { version: 170000 },
+      { [main.stableId]: main },
+      { [branch.stableId]: branch },
+    );
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toBeInstanceOf(RevokeRoleDefaultPrivileges);
+    expect(changes[0]?.serialize()).toBe(
+      "ALTER DEFAULT PRIVILEGES FOR ROLE r1 REVOKE ALL ON ROUTINES FROM executor",
+    );
   });
 
   test("no duplicate membership grants when members have multiple grantors", () => {

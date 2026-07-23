@@ -412,7 +412,10 @@ export function diffRoles(
               inSchema: defaultPriv.in_schema,
               objtype: defaultPriv.objtype,
               grantee: defaultPriv.grantee,
-              privileges: list,
+              privileges: list.map((privilege) => ({
+                ...privilege,
+                grantable: false,
+              })),
               version: ctx.version,
             }),
           );
@@ -455,7 +458,7 @@ export function diffRoles(
             if (wasGrantable && stillHasBase) {
               revokeGrantOption.push(privilege);
             } else {
-              revokes.push({ privilege, grantable: wasGrantable });
+              revokes.push({ privilege, grantable: false });
             }
           }
         }

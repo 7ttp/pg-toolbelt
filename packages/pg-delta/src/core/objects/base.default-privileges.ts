@@ -118,7 +118,12 @@ export class DefaultPrivilegeState {
 
     for (const priv of privileges) {
       const key = `${priv.privilege}:${priv.grantable}`;
-      privilegesSet.add(key);
+      if (priv.grantable) {
+        privilegesSet.delete(`${priv.privilege}:false`);
+        privilegesSet.add(key);
+      } else if (!privilegesSet.has(`${priv.privilege}:true`)) {
+        privilegesSet.add(key);
+      }
     }
   }
 
@@ -146,12 +151,15 @@ export class DefaultPrivilegeState {
     if (!privilegesSet) return;
 
     for (const priv of privileges) {
-      const key = `${priv.privilege}:${priv.grantable}`;
-      privilegesSet.delete(key);
-      // Also remove base privilege if grantable was revoked
       if (priv.grantable) {
-        const baseKey = `${priv.privilege}:false`;
-        privilegesSet.delete(baseKey);
+        // REVOKE GRANT OPTION keeps the underlying privilege.
+        if (privilegesSet.delete(`${priv.privilege}:true`)) {
+          privilegesSet.add(`${priv.privilege}:false`);
+        }
+      } else {
+        // Revoking the base privilege also removes any grant option.
+        privilegesSet.delete(`${priv.privilege}:false`);
+        privilegesSet.delete(`${priv.privilege}:true`);
       }
     }
   }
@@ -197,10 +205,11 @@ export class DefaultPrivilegeState {
             grantable,
             columns: null,
           };
-          defaultPrivs.set(
-            `${grantee}:${privilege}:${grantable}`,
-            privilegeProps,
-          );
+          const key = `${grantee}:${privilege}`;
+          const existing = defaultPrivs.get(key);
+          if (!existing || grantable) {
+            defaultPrivs.set(key, privilegeProps);
+          }
         }
       }
     }

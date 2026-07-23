@@ -81,6 +81,16 @@ for (const pgVersion of POSTGRES_VERSIONS) {
               TO PUBLIC, anon, authenticated;
           `,
           testSql: dedent`
+            CREATE OR REPLACE FUNCTION public.probe_fn()
+            RETURNS integer LANGUAGE sql AS $$ SELECT 2 $$;
+            CREATE OR REPLACE PROCEDURE public.probe_proc()
+            LANGUAGE sql AS $$ SELECT 2 $$;
+            CREATE OR REPLACE AGGREGATE public.probe_sum(integer) (
+              SFUNC = pg_catalog.int4pl,
+              STYPE = integer,
+              INITCOND = '1'
+            );
+
             ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
               REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated;
             ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
@@ -198,6 +208,28 @@ for (const pgVersion of POSTGRES_VERSIONS) {
           aggregate_locked: true,
           procedure_locked: true,
           selective_grant_kept: true,
+        });
+      }),
+    );
+
+    test(
+      "fully revokes a grantable default routine privilege",
+      withDbIsolated(pgVersion, async (db) => {
+        await roundtripFidelityTest({
+          mainSession: db.main,
+          branchSession: db.branch,
+          initialSetup: dedent`
+            CREATE ROLE executor;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres
+              GRANT EXECUTE ON FUNCTIONS TO executor WITH GRANT OPTION;
+          `,
+          testSql: dedent`
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres
+              REVOKE EXECUTE ON FUNCTIONS FROM executor;
+          `,
+          expectedSqlTerms: [
+            "ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE ALL ON ROUTINES FROM executor",
+          ],
         });
       }),
     );

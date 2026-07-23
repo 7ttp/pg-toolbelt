@@ -128,6 +128,38 @@ export function diffProcedures(
     );
   };
 
+  const appendAlteredProcedurePrivilegeChanges = (
+    mainProcedure: Procedure,
+    branchProcedure: Procedure,
+  ) => {
+    // Catalog extraction expands a null ACL to PostgreSQL's built-in PUBLIC
+    // EXECUTE grant. Compare the real ACLs so the common built-in cancels
+    // naturally, but an explicit revoke (its absence on one side) remains a
+    // meaningful diff.
+    // Filter out owner privileges - owner always has ALL privileges implicitly
+    // and shouldn't be compared. Use branch owner as the reference.
+    const privilegeResults = diffPrivileges(
+      mainProcedure.privileges,
+      branchProcedure.privileges,
+      branchProcedure.owner,
+    );
+
+    changes.push(
+      ...(emitObjectPrivilegeChanges(
+        privilegeResults,
+        branchProcedure,
+        mainProcedure,
+        "procedure",
+        {
+          Grant: GrantProcedurePrivileges,
+          Revoke: RevokeProcedurePrivileges,
+          RevokeGrantOption: RevokeGrantOptionProcedurePrivileges,
+        },
+        ctx.version,
+      ) as ProcedureChange[]),
+    );
+  };
+
   for (const procedureId of created) {
     appendCreateProcedureChanges(branch[procedureId]);
   }
@@ -214,6 +246,7 @@ export function diffProcedures(
           );
         }
       }
+      appendAlteredProcedurePrivilegeChanges(mainProcedure, branchProcedure);
     } else {
       // Only alterable properties changed - check each one
 
@@ -365,33 +398,7 @@ export function diffProcedures(
       // But since our Procedure model uses 'name' as the identity field,
       // a name change would be handled as drop + create by diffObjects()
 
-      // PRIVILEGES
-      // Catalog extraction expands a null ACL to PostgreSQL's built-in PUBLIC
-      // EXECUTE grant. Compare the real ACLs so the common built-in cancels
-      // naturally, but an explicit revoke (its absence on one side) remains a
-      // meaningful diff.
-      // Filter out owner privileges - owner always has ALL privileges implicitly
-      // and shouldn't be compared. Use branch owner as the reference.
-      const privilegeResults = diffPrivileges(
-        mainProcedure.privileges,
-        branchProcedure.privileges,
-        branchProcedure.owner,
-      );
-
-      changes.push(
-        ...(emitObjectPrivilegeChanges(
-          privilegeResults,
-          branchProcedure,
-          mainProcedure,
-          "procedure",
-          {
-            Grant: GrantProcedurePrivileges,
-            Revoke: RevokeProcedurePrivileges,
-            RevokeGrantOption: RevokeGrantOptionProcedurePrivileges,
-          },
-          ctx.version,
-        ) as ProcedureChange[]),
-      );
+      appendAlteredProcedurePrivilegeChanges(mainProcedure, branchProcedure);
     }
   }
 

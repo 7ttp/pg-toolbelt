@@ -285,6 +285,35 @@ describe.concurrent("aggregate.diff", () => {
     ).toBe("GRANT ALL ON FUNCTION public.agg_sum(integer) TO PUBLIC");
   });
 
+  test("create or replace still emits a simultaneous PUBLIC EXECUTE revoke", () => {
+    const main = makeAggregate({
+      owner: "postgres",
+      privileges: publicExecutePrivilege(),
+    });
+    const branch = makeAggregate({
+      owner: "postgres",
+      initial_condition: "1",
+    });
+
+    const changes = diffAggregates(
+      contextWith(),
+      { [main.stableId]: main },
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes.some(
+        (change) =>
+          change instanceof CreateAggregate && change.orReplace === true,
+      ),
+    ).toBe(true);
+    expect(
+      changes
+        .find((change) => change instanceof RevokeAggregatePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.agg_sum(integer) FROM PUBLIC");
+  });
+
   test("self-contained create still models PostgreSQL's built-in PUBLIC EXECUTE baseline", () => {
     const branch = makeAggregate({ owner: "postgres" });
     const changes = diffAggregates(
