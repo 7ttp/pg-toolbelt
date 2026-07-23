@@ -1,6 +1,7 @@
 {
   "a-to-b": {
     "require": ["alter:column"],
+    "forbid": ["replacement:column", "replacement:table"],
     "expectedFailure": {
       "assertion": "require:alter:column",
       "issue": "https://github.com/supabase/pg-toolbelt/issues/332",
@@ -9,6 +10,7 @@
   },
   "b-to-a": {
     "require": ["alter:column"],
+    "forbid": ["replacement:column", "replacement:table"],
     "expectedFailure": {
       "assertion": "require:alter:column",
       "issue": "https://github.com/supabase/pg-toolbelt/issues/332",

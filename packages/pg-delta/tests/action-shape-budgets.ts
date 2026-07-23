@@ -232,11 +232,24 @@ function addObservation(
   observations.set(key, ids);
 }
 
+function isRenameAction(action: Action): boolean {
+  return (
+    action.verb === "alter" &&
+    action.produces.length > 0 &&
+    action.destroys.length > 0
+  );
+}
+
 function rawSubject(action: Action): StableId | undefined {
-  // Match action-emitter's subject/lock convention exactly. This matters for a
-  // rename: it produces the new root and destroys the old root while consuming
-  // its parent, so consumes-first would misclassify `alter:table` as
-  // `alter:schema`.
+  if (action.verb === "alter") {
+    // A rename consumes its parent but produces/destroys the renamed subtree,
+    // so its new root is the semantic subject. Ordinary alters consume the fact
+    // they change; produces/destroys may only describe graph side effects such
+    // as an identity column's backing sequence.
+    return isRenameAction(action)
+      ? action.produces[0]
+      : (action.consumes[0] ?? action.produces[0] ?? action.destroys[0]);
+  }
   return action.produces[0] ?? action.destroys[0] ?? action.consumes[0];
 }
 
@@ -255,7 +268,7 @@ function observeActions(actions: readonly Action[]): Map<string, string[]> {
       for (const id of action.destroys) dropped.set(encodeId(id), id);
     } else if (action.verb === "create") {
       for (const id of action.produces) created.set(encodeId(id), id);
-    } else if (action.produces.length > 0 && action.destroys.length > 0) {
+    } else if (isRenameAction(action)) {
       const producedRoot = action.produces[0] as StableId;
       const destroyedRoot = action.destroys[0] as StableId;
       addObservation(
