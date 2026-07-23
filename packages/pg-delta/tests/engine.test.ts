@@ -15,6 +15,7 @@ import { plan } from "../src/plan/plan.ts";
 import { probeApplierCapability } from "../src/policy/capability.ts";
 import { rel } from "../src/plan/render.ts";
 import { provePlan } from "../src/proof/prove.ts";
+import { enforceActionShapeBudgetForMode } from "./action-shape-budgets.ts";
 import { enforceSeedCoverage, runPinnedDirection } from "./seed-coverage.ts";
 import { loadCorpus, type Scenario } from "./corpus.ts";
 import { mustRunSerially } from "./corpus-scheduling.ts";
@@ -74,6 +75,7 @@ async function proveOn(
   name: string,
   scenarioName: string,
   direction: "forward" | "reverse",
+  actionShapeBudget: Scenario["actionShapeBudget"],
   compact: boolean,
   clusterA: Cluster,
   clusterB: Cluster,
@@ -101,6 +103,13 @@ async function proveOn(
       capability,
       compact,
     });
+    enforceActionShapeBudgetForMode(
+      compact,
+      thePlan.actions,
+      actionShapeBudget,
+      scenarioName,
+      direction,
+    );
 
     const clone = await source.clone();
     // the original source DB would block cluster-wide DROP ROLE actions
@@ -203,6 +212,7 @@ async function runDirection(
             key,
             scenario.name,
             direction,
+            scenario.actionShapeBudget,
             compact,
             clusterA,
             clusterB,
