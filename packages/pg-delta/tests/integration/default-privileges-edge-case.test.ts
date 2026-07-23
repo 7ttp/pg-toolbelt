@@ -8,8 +8,9 @@
  *    and not generate grants that would conflict with the user's intent
  */
 
-import { describe, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import dedent from "dedent";
+import { supabase } from "../../src/core/integrations/supabase.ts";
 import { POSTGRES_VERSIONS } from "../constants.ts";
 import { roundtripFidelityTest } from "../integration/roundtrip.ts";
 import { withDbIsolated } from "../utils.ts";
@@ -41,6 +42,162 @@ for (const pgVersion of POSTGRES_VERSIONS) {
           REVOKE ALL ON public.test FROM anon;
         `,
           expectedSqlTerms: ["REVOKE ALL ON public.test FROM anon"],
+        });
+      }),
+    );
+
+    test(
+      "replays declarative default ACL and routine EXECUTE hardening",
+      withDbIsolated(pgVersion, async (db) => {
+        await roundtripFidelityTest({
+          mainSession: db.main,
+          branchSession: db.branch,
+          integration: supabase,
+          initialSetup: dedent`
+            CREATE ROLE anon;
+            CREATE ROLE authenticated;
+            CREATE ROLE acl_bystander;
+
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              GRANT ALL ON TABLES TO PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              GRANT ALL ON SEQUENCES TO PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              GRANT EXECUTE ON FUNCTIONS TO PUBLIC, anon, authenticated;
+
+            CREATE FUNCTION public.probe_fn()
+            RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;
+            CREATE FUNCTION public.allowed_helper()
+            RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;
+            CREATE PROCEDURE public.probe_proc()
+            LANGUAGE sql AS $$ SELECT 1 $$;
+            CREATE AGGREGATE public.probe_sum(integer) (
+              SFUNC = pg_catalog.int4pl,
+              STYPE = integer,
+              INITCOND = '0'
+            );
+
+            GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public
+              TO PUBLIC, anon, authenticated;
+          `,
+          testSql: dedent`
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated;
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated;
+
+            -- Per-schema defaults are additive; the built-in PUBLIC EXECUTE
+            -- default must be revoked globally.
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres
+              REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+            REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public
+              FROM PUBLIC, anon, authenticated;
+            REVOKE EXECUTE ON PROCEDURE public.probe_proc()
+              FROM PUBLIC, anon, authenticated;
+            REVOKE EXECUTE ON FUNCTION public.probe_sum(integer)
+              FROM PUBLIC, anon, authenticated;
+            GRANT EXECUTE ON FUNCTION public.allowed_helper()
+              TO authenticated;
+          `,
+          assertSqlStatements: (statements) => {
+            expect(
+              statements
+                .filter(
+                  (statement) =>
+                    statement.startsWith("ALTER DEFAULT PRIVILEGES") ||
+                    statement.startsWith("GRANT ") ||
+                    statement.startsWith("REVOKE "),
+                )
+                .sort(),
+            ).toMatchInlineSnapshot(`
+              [
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON ROUTINES FROM PUBLIC",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON ROUTINES FROM anon",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON ROUTINES FROM authenticated",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON SEQUENCES FROM authenticated",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON TABLES FROM anon",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE ALL ON TABLES FROM authenticated",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE postgres REVOKE ALL ON ROUTINES FROM PUBLIC",
+                "REVOKE ALL ON FUNCTION public.allowed_helper() FROM PUBLIC",
+                "REVOKE ALL ON FUNCTION public.allowed_helper() FROM anon",
+                "REVOKE ALL ON FUNCTION public.probe_fn() FROM PUBLIC",
+                "REVOKE ALL ON FUNCTION public.probe_fn() FROM anon",
+                "REVOKE ALL ON FUNCTION public.probe_fn() FROM authenticated",
+                "REVOKE ALL ON FUNCTION public.probe_sum(integer) FROM PUBLIC",
+                "REVOKE ALL ON FUNCTION public.probe_sum(integer) FROM anon",
+                "REVOKE ALL ON FUNCTION public.probe_sum(integer) FROM authenticated",
+                "REVOKE ALL ON PROCEDURE public.probe_proc() FROM PUBLIC",
+                "REVOKE ALL ON PROCEDURE public.probe_proc() FROM anon",
+                "REVOKE ALL ON PROCEDURE public.probe_proc() FROM authenticated",
+              ]
+            `);
+          },
+        });
+
+        const defaultAclSql = dedent`
+          SELECT
+            d.defaclnamespace,
+            d.defaclobjtype,
+            acl.grantee,
+            acl.privilege_type,
+            acl.is_grantable
+          FROM pg_catalog.pg_default_acl AS d
+          LEFT JOIN LATERAL aclexplode(d.defaclacl) AS acl ON TRUE
+          WHERE d.defaclrole = 'postgres'::regrole
+          ORDER BY 1, 2, 3, 4, 5
+        `;
+        const [mainDefaultAcl, branchDefaultAcl] = await Promise.all([
+          db.main.query(defaultAclSql),
+          db.branch.query(defaultAclSql),
+        ]);
+        expect(mainDefaultAcl.rows).toEqual(branchDefaultAcl.rows);
+
+        await db.main.query(dedent`
+          CREATE TABLE public.post_harden_probe (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+          );
+          CREATE FUNCTION public.post_harden_fn()
+          RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;
+        `);
+
+        const { rows } = await db.main.query(dedent`
+          SELECT
+            NOT has_table_privilege(
+              'anon', 'public.post_harden_probe', 'SELECT'
+            ) AS table_locked,
+            NOT has_sequence_privilege(
+              'authenticated', 'public.post_harden_probe_id_seq', 'USAGE'
+            ) AS sequence_locked,
+            NOT has_function_privilege(
+              'acl_bystander', 'public.post_harden_fn()', 'EXECUTE'
+            ) AS function_default_locked,
+            NOT has_function_privilege(
+              'acl_bystander', 'public.probe_fn()', 'EXECUTE'
+            ) AS existing_function_locked,
+            NOT has_function_privilege(
+              'acl_bystander', 'public.probe_sum(integer)', 'EXECUTE'
+            ) AS aggregate_locked,
+            NOT has_function_privilege(
+              'acl_bystander', 'public.probe_proc()', 'EXECUTE'
+            ) AS procedure_locked,
+            has_function_privilege(
+              'authenticated', 'public.allowed_helper()', 'EXECUTE'
+            ) AS selective_grant_kept
+        `);
+        expect(rows[0]).toEqual({
+          table_locked: true,
+          sequence_locked: true,
+          function_default_locked: true,
+          existing_function_locked: true,
+          aggregate_locked: true,
+          procedure_locked: true,
+          selective_grant_kept: true,
         });
       }),
     );

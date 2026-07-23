@@ -12,6 +12,10 @@ import {
 import { CreateCommentOnProcedure } from "./changes/procedure.comment.ts";
 import { CreateProcedure } from "./changes/procedure.create.ts";
 import { DropProcedure } from "./changes/procedure.drop.ts";
+import {
+  GrantProcedurePrivileges,
+  RevokeProcedurePrivileges,
+} from "./changes/procedure.privilege.ts";
 import { diffProcedures } from "./procedure.diff.ts";
 import { Procedure, type ProcedureProps } from "./procedure.model.ts";
 
@@ -54,6 +58,39 @@ const testContext = {
   defaultPrivilegeState: new DefaultPrivilegeState({}),
   mainRoles: {},
 };
+
+function procedure(overrides: Partial<ProcedureProps> = {}): Procedure {
+  return new Procedure({
+    ...base,
+    owner: "postgres",
+    privileges: [],
+    ...overrides,
+  });
+}
+
+function publicExecutePrivilege() {
+  return [{ grantee: "PUBLIC", privilege: "EXECUTE", grantable: false }];
+}
+
+function routineDefaults(): DefaultPrivilegeState {
+  const state = new DefaultPrivilegeState({});
+  state.applyGrant("postgres", "f", null, "PUBLIC", [
+    { privilege: "EXECUTE", grantable: false },
+  ]);
+  return state;
+}
+
+function contextWith(
+  overrides: Partial<typeof testContext> & {
+    skipDefaultPrivilegeSubtraction?: boolean;
+  } = {},
+) {
+  return {
+    ...testContext,
+    defaultPrivilegeState: new DefaultPrivilegeState({}),
+    ...overrides,
+  };
+}
 
 describe.concurrent("procedure.diff", () => {
   test("create and drop", () => {
@@ -280,5 +317,94 @@ describe.concurrent("procedure.diff", () => {
     expect(
       changes.some((change) => change instanceof CreateCommentOnProcedure),
     ).toBe(true);
+  });
+
+  test("create revokes the built-in PUBLIC EXECUTE privilege when absent from the target", () => {
+    const branch = procedure();
+    const defaultPrivilegeState = routineDefaults();
+    defaultPrivilegeState.applyGrant("postgres", "f", "public", "anon", [
+      { privilege: "EXECUTE", grantable: false },
+    ]);
+    const changes = diffProcedures(
+      contextWith({ defaultPrivilegeState }),
+      {},
+      { [branch.stableId]: branch },
+    );
+
+    const revoke = changes.find(
+      (change) => change instanceof RevokeProcedurePrivileges,
+    );
+
+    expect(revoke?.serialize()).toBe(
+      "REVOKE ALL ON FUNCTION public.fn1() FROM PUBLIC",
+    );
+    expect(
+      changes
+        .find(
+          (change) =>
+            change instanceof RevokeProcedurePrivileges &&
+            change.grantee === "anon",
+        )
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.fn1() FROM anon");
+  });
+
+  test("create keeps the built-in PUBLIC EXECUTE privilege without a redundant grant", () => {
+    const branch = procedure({ privileges: publicExecutePrivilege() });
+    const changes = diffProcedures(
+      contextWith({ defaultPrivilegeState: routineDefaults() }),
+      {},
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes.filter(
+        (change) =>
+          change instanceof GrantProcedurePrivileges ||
+          change instanceof RevokeProcedurePrivileges,
+      ),
+    ).toEqual([]);
+  });
+
+  test("alter emits a PUBLIC EXECUTE revoke and can restore it with a grant", () => {
+    const withPublic = procedure({ privileges: publicExecutePrivilege() });
+    const withoutPublic = procedure();
+
+    const revokeChanges = diffProcedures(
+      contextWith(),
+      { [withPublic.stableId]: withPublic },
+      { [withoutPublic.stableId]: withoutPublic },
+    );
+    const grantChanges = diffProcedures(
+      contextWith(),
+      { [withoutPublic.stableId]: withoutPublic },
+      { [withPublic.stableId]: withPublic },
+    );
+
+    expect(
+      revokeChanges
+        .find((change) => change instanceof RevokeProcedurePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.fn1() FROM PUBLIC");
+    expect(
+      grantChanges
+        .find((change) => change instanceof GrantProcedurePrivileges)
+        ?.serialize(),
+    ).toBe("GRANT ALL ON FUNCTION public.fn1() TO PUBLIC");
+  });
+
+  test("self-contained create still models PostgreSQL's built-in PUBLIC EXECUTE baseline", () => {
+    const branch = procedure();
+    const changes = diffProcedures(
+      contextWith({ skipDefaultPrivilegeSubtraction: true }),
+      {},
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes
+        .find((change) => change instanceof RevokeProcedurePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.fn1() FROM PUBLIC");
   });
 });

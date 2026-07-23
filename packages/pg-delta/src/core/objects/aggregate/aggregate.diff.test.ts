@@ -75,6 +75,30 @@ const testContext = {
   mainRoles: {},
 };
 
+function publicExecutePrivilege() {
+  return [{ grantee: "PUBLIC", privilege: "EXECUTE", grantable: false }];
+}
+
+function routineDefaults(): DefaultPrivilegeState {
+  const state = new DefaultPrivilegeState({});
+  state.applyGrant("postgres", "f", null, "PUBLIC", [
+    { privilege: "EXECUTE", grantable: false },
+  ]);
+  return state;
+}
+
+function contextWith(
+  overrides: Partial<typeof testContext> & {
+    skipDefaultPrivilegeSubtraction?: boolean;
+  } = {},
+) {
+  return {
+    ...testContext,
+    defaultPrivilegeState: new DefaultPrivilegeState({}),
+    ...overrides,
+  };
+}
+
 describe.concurrent("aggregate.diff", () => {
   test("create and drop emit expected changes", () => {
     const aggregate = makeAggregate({ comment: "sum comment" });
@@ -211,5 +235,68 @@ describe.concurrent("aggregate.diff", () => {
         grantable: false,
       } as never,
     ]);
+  });
+
+  test("create revokes the built-in PUBLIC EXECUTE privilege when absent from the target", () => {
+    const branch = makeAggregate({ owner: "postgres" });
+    const changes = diffAggregates(
+      contextWith({ defaultPrivilegeState: routineDefaults() }),
+      {},
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes
+        .find((change) => change instanceof RevokeAggregatePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.agg_sum(integer) FROM PUBLIC");
+  });
+
+  test("alter emits a PUBLIC EXECUTE revoke and can restore it with a grant", () => {
+    const withPublic = makeAggregate({
+      owner: "postgres",
+      privileges: publicExecutePrivilege(),
+    });
+    const withoutPublic = makeAggregate({
+      owner: "postgres",
+      privileges: [],
+    });
+
+    const revokeChanges = diffAggregates(
+      contextWith(),
+      { [withPublic.stableId]: withPublic },
+      { [withoutPublic.stableId]: withoutPublic },
+    );
+    const grantChanges = diffAggregates(
+      contextWith(),
+      { [withoutPublic.stableId]: withoutPublic },
+      { [withPublic.stableId]: withPublic },
+    );
+
+    expect(
+      revokeChanges
+        .find((change) => change instanceof RevokeAggregatePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.agg_sum(integer) FROM PUBLIC");
+    expect(
+      grantChanges
+        .find((change) => change instanceof GrantAggregatePrivileges)
+        ?.serialize(),
+    ).toBe("GRANT ALL ON FUNCTION public.agg_sum(integer) TO PUBLIC");
+  });
+
+  test("self-contained create still models PostgreSQL's built-in PUBLIC EXECUTE baseline", () => {
+    const branch = makeAggregate({ owner: "postgres" });
+    const changes = diffAggregates(
+      contextWith({ skipDefaultPrivilegeSubtraction: true }),
+      {},
+      { [branch.stableId]: branch },
+    );
+
+    expect(
+      changes
+        .find((change) => change instanceof RevokeAggregatePrivileges)
+        ?.serialize(),
+    ).toBe("REVOKE ALL ON FUNCTION public.agg_sum(integer) FROM PUBLIC");
   });
 });
