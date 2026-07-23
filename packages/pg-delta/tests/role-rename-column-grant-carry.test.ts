@@ -16,6 +16,7 @@
  * test (e)). Docker required.
  */
 import { describe, expect, test } from "bun:test";
+import { subjectOf } from "../src/core/diff.ts";
 import { extract } from "../src/extract/extract.ts";
 import { plan } from "../src/plan/plan.ts";
 import { provePlan } from "../src/proof/prove.ts";
@@ -78,6 +79,9 @@ describe("role rename carries a column-level grant (no spurious REVOKE/GRANT)", 
     const grants = thePlan.actions.filter((a) => /\bGRANT\b/.test(a.sql));
     expect(revokes.map((a) => a.sql)).toEqual([]);
     expect(grants.map((a) => a.sql)).toEqual([]);
+    expect(
+      thePlan.deltas.filter((delta) => subjectOf(delta).kind === "acl"),
+    ).toEqual([]);
 
     const verdict = await provePlan(thePlan, srcDb.pool, dstState.factBase);
     expect(verdict.applyError).toBeUndefined();

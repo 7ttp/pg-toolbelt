@@ -1,6 +1,7 @@
 /** Corpus loader (stage 0): one directory per scenario, a.sql + b.sql. */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { RenameMode } from "../src/plan/renames.ts";
 import { parseActionShapeBudget } from "./action-shape-budgets.ts";
 
 export interface ScenarioMeta {
@@ -9,6 +10,8 @@ export interface ScenarioMeta {
   isolatedCluster?: boolean;
   /** Minimum PostgreSQL major version this scenario's DDL needs. */
   minVersion?: number;
+  /** Rename-candidate handling for this scenario's plans. */
+  renames?: RenameMode;
 }
 
 export interface Scenario {

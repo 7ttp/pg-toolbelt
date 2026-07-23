@@ -45,3 +45,16 @@ describe("loadCorpus action-shape budgets", () => {
     ]);
   });
 });
+
+describe("loadCorpus rename modes", () => {
+  test("loads the per-scenario rename mode", () => {
+    const scenario = loadCorpus().find(
+      (entry) => entry.name === "role-rename--policy-reference",
+    );
+
+    expect(scenario?.meta).toEqual({
+      isolatedCluster: true,
+      renames: "auto",
+    });
+  });
+});

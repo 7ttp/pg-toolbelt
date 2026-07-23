@@ -76,6 +76,7 @@ async function proveOn(
   scenarioName: string,
   direction: "forward" | "reverse",
   actionShapeBudget: Scenario["actionShapeBudget"],
+  renames: Scenario["meta"]["renames"],
   compact: boolean,
   clusterA: Cluster,
   clusterB: Cluster,
@@ -102,6 +103,7 @@ async function proveOn(
     const thePlan = plan(sourceState.factBase, desiredState.factBase, {
       capability,
       compact,
+      renames: renames ?? "off",
     });
     enforceActionShapeBudgetForMode(
       compact,
@@ -213,6 +215,7 @@ async function runDirection(
             scenario.name,
             direction,
             scenario.actionShapeBudget,
+            scenario.meta.renames,
             compact,
             clusterA,
             clusterB,

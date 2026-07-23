@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { apply } from "../src/apply/apply.ts";
 import { extract } from "../src/extract/extract.ts";
+import { normalizeRoleIdentities } from "../src/plan/identity-normalize.ts";
 import { plan } from "../src/plan/plan.ts";
 import { provePlan } from "../src/proof/prove.ts";
 import {
@@ -77,9 +78,15 @@ describe("stage 9: renames", () => {
         .toMatchInlineSnapshot(`
         [
           "ALTER ROLE "renpolicy_old" RENAME TO "renpolicy_new"",
-          "ALTER POLICY "docs_read" ON "app"."docs" TO "renpolicy_new"",
         ]
       `);
+      expect(thePlan.deltas).toEqual([]);
+      expect(thePlan.source.fingerprint).toBe(sourceState.factBase.rootHash);
+      const canonicalSource = normalizeRoleIdentities(
+        sourceState.factBase,
+        new Map([["renpolicy_old", "renpolicy_new"]]),
+      );
+      expect(canonicalSource.rootHash).not.toBe(sourceState.factBase.rootHash);
       const verdict = await provePlan(
         thePlan,
         source.pool,

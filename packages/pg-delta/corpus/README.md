@@ -4,6 +4,8 @@ Each directory is one schema transition. `a.sql` and `b.sql` define its two
 states; the engine corpus plans and proves both `a` → `b` and `b` → `a`.
 Optional `seed.sql` and `seed-b.sql` files seed the corresponding source state,
 and `meta.json` carries fixture scheduling or PostgreSQL-version metadata.
+`meta.json` may also set `"renames": "auto" | "prompt" | "off"` to choose
+rename handling for that scenario; omitted scenarios keep the `off` default.
 
 ## Action-shape budgets
 

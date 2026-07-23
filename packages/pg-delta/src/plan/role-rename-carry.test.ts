@@ -68,7 +68,7 @@ const rolePolicyBase = (role: string, includeRole = true) =>
   );
 
 describe("accepted role rename + policy role payload (B1)", () => {
-  test("orders the rename before ALTER POLICY without a dependency cycle", () => {
+  test("emits only the rename and exposes no policy-reference churn", () => {
     let thePlan!: ReturnType<typeof plan>;
     expect(() => {
       thePlan = plan(rolePolicyBase("role_a"), rolePolicyBase("role_b"), {
@@ -80,9 +80,9 @@ describe("accepted role rename + policy role payload (B1)", () => {
     expect(thePlan.actions.map((action) => action.sql)).toMatchInlineSnapshot(`
       [
         "ALTER ROLE "role_a" RENAME TO "role_b"",
-        "ALTER POLICY "docs_read" ON "app"."docs" TO "role_b"",
       ]
     `);
+    expect(thePlan.deltas).toEqual([]);
   });
 
   test("still releases a genuinely dropped role before DROP ROLE", () => {
