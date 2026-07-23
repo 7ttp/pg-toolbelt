@@ -9,6 +9,7 @@ import { apply } from "../src/apply/apply.ts";
 import { extract } from "../src/extract/extract.ts";
 import { normalizeRoleIdentities } from "../src/plan/identity-normalize.ts";
 import { plan } from "../src/plan/plan.ts";
+import type { Policy } from "../src/policy/policy.ts";
 import { provePlan } from "../src/proof/prove.ts";
 import {
   isolatedClusterPair,
@@ -87,6 +88,88 @@ describe("stage 9: renames", () => {
         new Map([["renpolicy_old", "renpolicy_new"]]),
       );
       expect(canonicalSource.rootHash).not.toBe(sourceState.factBase.rootHash);
+      const verdict = await provePlan(
+        thePlan,
+        source.pool,
+        desiredState.factBase,
+      );
+      expect(verdict.applyError).toBeUndefined();
+      expect(verdict.driftDeltas).toEqual([]);
+      expect(verdict.ok).toBe(true);
+    } finally {
+      await Promise.all([
+        source.drop().catch(() => {}),
+        desired.drop().catch(() => {}),
+      ]);
+    }
+  }, 120_000);
+
+  test("canonical policy filtering vetoes an object rename and the projected target proves", async () => {
+    const [sourceCluster, desiredCluster] = await isolatedClusterPair();
+    const source = await sourceCluster.createDb("ren_filter_src");
+    const desired = await desiredCluster.createDb("ren_filter_dst");
+    const policy: Policy = {
+      id: "canonical-owner-filter",
+      filter: [
+        {
+          match: {
+            all: [
+              { kind: "table" },
+              { name: "old_t" },
+              { owner: "renfilter_new" },
+              { verb: "remove" },
+            ],
+          },
+          action: "exclude",
+        },
+      ],
+    };
+
+    try {
+      await sourceCluster.adminPool.query(`CREATE ROLE renfilter_old NOLOGIN`);
+      await sourceCluster.adminPool.query(
+        `ALTER ROLE renfilter_old SET statement_timeout = '51515ms'`,
+      );
+      await source.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.old_t (id integer);
+        ALTER TABLE app.old_t OWNER TO renfilter_old;
+        INSERT INTO app.old_t VALUES (7);
+      `);
+
+      await desiredCluster.adminPool.query(`CREATE ROLE renfilter_new NOLOGIN`);
+      await desiredCluster.adminPool.query(
+        `ALTER ROLE renfilter_new SET statement_timeout = '51515ms'`,
+      );
+      await desired.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TABLE app.new_t (id integer);
+        ALTER TABLE app.new_t OWNER TO renfilter_new;
+      `);
+
+      const [sourceState, desiredState] = await Promise.all([
+        extract(source.pool),
+        extract(desired.pool),
+      ]);
+      const thePlan = plan(sourceState.factBase, desiredState.factBase, {
+        renames: "auto",
+        compact: false,
+        policy,
+      });
+      const sql = thePlan.actions.map((action) => action.sql);
+
+      expect(sql).toContain(
+        'ALTER ROLE "renfilter_old" RENAME TO "renfilter_new"',
+      );
+      expect(
+        sql.some(
+          (statement) =>
+            statement.includes("ALTER TABLE") &&
+            statement.includes("RENAME TO"),
+        ),
+      ).toBe(false);
+      expect(sql).toContain('CREATE TABLE "app"."new_t" ()');
+
       const verdict = await provePlan(
         thePlan,
         source.pool,

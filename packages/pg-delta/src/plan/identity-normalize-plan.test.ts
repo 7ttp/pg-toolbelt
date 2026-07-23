@@ -23,17 +23,19 @@ const rolePayload = () => ({
   config: ["statement_timeout=42424ms"],
 });
 
-const policyFact = (role: string): Fact => ({
+const policyFactForRoles = (roles: string[]): Fact => ({
   id: policy,
   parent: table,
   payload: {
     cmd: "r",
     permissive: true,
-    roles: [role],
+    roles,
     usingExpr: "true",
     checkExpr: null,
   },
 });
+
+const policyFact = (role: string): Fact => policyFactForRoles([role]);
 
 const rolePolicyBase = (role: string, includeRole = true) =>
   buildFactBase(
@@ -84,5 +86,43 @@ describe("pre-diff role identity normalization", () => {
     expect(alterPolicy).toBeGreaterThanOrEqual(0);
     expect(dropRole).toBeGreaterThanOrEqual(0);
     expect(alterPolicy).toBeLessThan(dropRole);
+  });
+
+  test("a policy mutation consumes a retained renamed role", () => {
+    const auxiliaryRole: StableId = { kind: "role", name: "role_aux" };
+    const source = buildFactBase(
+      [
+        { id: { kind: "role", name: "role_a" }, payload: rolePayload() },
+        { id: auxiliaryRole, payload: rolePayload() },
+        { id: schema, payload: {} },
+        { id: table, parent: schema, payload: { persistence: "p" } },
+        policyFactForRoles(["role_a"]),
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: { kind: "role", name: "role_b" }, payload: rolePayload() },
+        { id: auxiliaryRole, payload: rolePayload() },
+        { id: schema, payload: {} },
+        { id: table, parent: schema, payload: { persistence: "p" } },
+        policyFactForRoles(["role_b", "role_aux"]),
+      ],
+      [],
+    );
+
+    const thePlan = plan(source, desired, {
+      renames: "auto",
+      compact: false,
+    });
+    const policyAction = thePlan.actions.find((action) =>
+      action.sql.startsWith('ALTER POLICY "docs_read"'),
+    );
+
+    expect(policyAction).toBeDefined();
+    expect(policyAction?.consumes).toContainEqual({
+      kind: "role",
+      name: "role_b",
+    });
   });
 });

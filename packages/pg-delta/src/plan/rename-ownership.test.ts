@@ -118,6 +118,56 @@ describe("accepted table rename + accepted owner-role rename (review P1 #2)", ()
     // ownership is carried by the renames — no ALTER … OWNER TO is needed
     expect(p.actions.filter((a) => a.sql.includes("OWNER TO"))).toHaveLength(0);
   });
+
+  test("canonical filtering can veto the table rename after owner normalization", () => {
+    const source = buildFactBase(
+      [
+        { id: role1, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: oldTable, parent: schema, payload: tablePayload() },
+      ],
+      [{ from: oldTable, to: role1, kind: "owner" }],
+    );
+    const desired = buildFactBase(
+      [
+        { id: role2, payload: rolePayload(false) },
+        { id: schema, payload: {} },
+        { id: newTable, parent: schema, payload: tablePayload() },
+      ],
+      [{ from: newTable, to: role2, kind: "owner" }],
+    );
+
+    const p = plan(source, desired, {
+      renames: "auto",
+      compact: false,
+      policy: {
+        id: "canonical-owner-filter",
+        filter: [
+          {
+            match: {
+              all: [
+                { kind: "table" },
+                { name: "old_t" },
+                { owner: "r2" },
+                { verb: "remove" },
+              ],
+            },
+            action: "exclude",
+          },
+        ],
+      },
+    });
+    const sql = p.actions.map((action) => action.sql);
+
+    expect(sql).toContain('ALTER ROLE "r1" RENAME TO "r2"');
+    expect(
+      sql.some(
+        (statement) =>
+          statement.includes("ALTER TABLE") && statement.includes("RENAME TO"),
+      ),
+    ).toBe(false);
+    expect(sql).toContain('CREATE TABLE "app"."new_t" ()');
+  });
 });
 
 const stableTable: StableId = { kind: "table", schema: "app", name: "t" };
