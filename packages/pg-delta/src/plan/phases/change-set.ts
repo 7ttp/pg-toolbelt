@@ -80,6 +80,37 @@ function groupDeltas(deltas: readonly Delta[]): {
   return { removed, added, setsByFact };
 }
 
+/** Whether the effective policy-projected target is exactly compatible with a
+ * physical ordinary rename. The old root must be gone, the complete desired
+ * subtree (including outgoing edges via its Merkle rollup) must be unchanged,
+ * and incoming edges to every renamed descendant must match. Comparing the
+ * projected target—not raw filtered deltas—allows harmless old-side facts that
+ * projectTarget pruned as orphans while still rejecting partial new subtrees. */
+function renameMatchesProjectedTarget(
+  desired: FactBase,
+  projectedDesired: FactBase,
+  from: StableId,
+  to: StableId,
+): boolean {
+  if (projectedDesired.has(from) || !projectedDesired.has(to)) return false;
+  if (projectedDesired.rollupOf(to) !== desired.rollupOf(to)) return false;
+
+  const desiredSubtree = new Set(subtreeIds(desired, to).map(encodeId));
+  const incomingSignature = (fb: FactBase): string[] =>
+    fb.edges
+      .filter((edge) => desiredSubtree.has(encodeId(edge.to)))
+      .map(
+        (edge) => `${encodeId(edge.from)}-[${edge.kind}]->${encodeId(edge.to)}`,
+      )
+      .sort();
+  const desiredIncoming = incomingSignature(desired);
+  const projectedIncoming = incomingSignature(projectedDesired);
+  return (
+    desiredIncoming.length === projectedIncoming.length &&
+    desiredIncoming.every((edge, index) => edge === projectedIncoming[index])
+  );
+}
+
 /** Build the canonical change set while retaining the physical source gate. */
 export function buildChangeSet(
   rawSource: FactBase,
@@ -136,7 +167,7 @@ export function buildChangeSet(
 
   const renameMode: RenameMode = options?.renames ?? "off";
   const renameCandidates: RenameCandidate[] = [];
-  const acceptedRenames: AcceptedRename[] = [];
+  const discoveredRenames: AcceptedRename[] = [];
   if (renameMode !== "off") {
     const candidates = matchRenameCandidates(
       discoveryRemoved,
@@ -157,7 +188,7 @@ export function buildChangeSet(
       if (renameMode === "prompt" && !confirmed.has(key)) continue;
       const from = discoveryRemoved.get(encodeId(candidate.from)) as Fact;
       const to = discoveryAdded.get(encodeId(candidate.to)) as Fact;
-      acceptedRenames.push({
+      discoveredRenames.push({
         from,
         to,
         sourceSubtree: subtreeIds(physicalSource, candidate.from),
@@ -168,7 +199,7 @@ export function buildChangeSet(
 
   // PostgreSQL carries role references by OID. Rewrite both managed views into
   // desired-name space so the generic diff sees that continuity directly.
-  const roleRenameMap = buildRoleRenameMap(acceptedRenames);
+  const roleRenameMap = buildRoleRenameMap(discoveredRenames);
   const source = normalizeRoleIdentities(physicalSource, roleRenameMap);
   const desired = normalizeRoleIdentities(physicalDesired, roleRenameMap);
 
@@ -180,6 +211,31 @@ export function buildChangeSet(
   // to canonical source. The physical source is retained only for fingerprinting.
   const projectedDesired = projectTarget(desired, filteredDeltas);
   const { removed, added, setsByFact } = groupDeltas(deltas);
+
+  // Discovery runs in physical identity space, but canonical filtering can
+  // change the effective target of an ordinary object rename. PostgreSQL cannot
+  // rename only part of a subtree, so retain the rename only when the projected
+  // target contains no old root and exactly the desired destination subtree and
+  // incoming edges. Leave surviving worklist entries alone otherwise so
+  // ordinary create/drop converges on the policy-projected target.
+  // Accepted role renames are the deliberate exception: normalization erases
+  // their canonical remove/add pair by construction, while PostgreSQL carries
+  // their normalized role references by OID.
+  const acceptedRenames = discoveredRenames.filter(({ from, to }) => {
+    if (from.id.kind === "role" && to.id.kind === "role") return true;
+    const canonicalFrom = relabelRoleNames(from.id, roleRenameMap);
+    const canonicalTo = relabelRoleNames(to.id, roleRenameMap);
+    return (
+      removed.has(encodeId(canonicalFrom)) &&
+      added.has(encodeId(canonicalTo)) &&
+      renameMatchesProjectedTarget(
+        desired,
+        projectedDesired,
+        canonicalFrom,
+        canonicalTo,
+      )
+    );
+  });
 
   // Ordinary object renames still remove their structural subtrees from the
   // create/drop worklists. Role renames are already one canonical identity;
