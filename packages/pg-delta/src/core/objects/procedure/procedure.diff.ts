@@ -1,8 +1,8 @@
 import { diffObjects } from "../base.diff.ts";
+import { getRoutineCreationPrivileges } from "../base.default-privileges.ts";
 import {
   diffPrivileges,
   emitObjectPrivilegeChanges,
-  filterPublicBuiltInDefaults,
 } from "../base.privilege-diff.ts";
 import type { ObjectDiffContext } from "../diff-context.ts";
 import { diffSecurityLabels } from "../security-label.types.ts";
@@ -45,7 +45,10 @@ import type { Procedure } from "./procedure.model.ts";
 export function diffProcedures(
   ctx: Pick<
     ObjectDiffContext,
-    "version" | "currentUser" | "defaultPrivilegeState"
+    | "version"
+    | "currentUser"
+    | "defaultPrivilegeState"
+    | "skipDefaultPrivilegeSubtraction"
   >,
   main: Record<string, Procedure>,
   branch: Record<string, Procedure>,
@@ -85,28 +88,27 @@ export function diffProcedures(
     // so objects are created with the default privileges state in effect.
     // We compare default privileges against desired privileges to generate REVOKE/GRANT statements
     // needed to reach the final desired state.
-    const effectiveDefaults = ctx.defaultPrivilegeState.getEffectiveDefaults(
+    //
+    // PostgreSQL grants PUBLIC EXECUTE on new routines by default. Model that
+    // grant in the creation baseline instead of filtering it from both sides:
+    // retaining it then emits nothing, while explicitly removing it emits the
+    // required REVOKE.
+    const effectiveDefaults = getRoutineCreationPrivileges(
+      ctx.defaultPrivilegeState,
       ctx.currentUser,
-      "procedure",
       proc.schema ?? "",
+      ctx.skipDefaultPrivilegeSubtraction,
     );
     const creatorFilteredDefaults =
       proc.owner !== ctx.currentUser
         ? effectiveDefaults.filter((p) => p.grantee !== ctx.currentUser)
         : effectiveDefaults;
-    // Filter out PUBLIC's built-in default EXECUTE privilege (PostgreSQL grants it automatically)
-    // Reference: https://www.postgresql.org/docs/17/ddl-priv.html Table 5.2
-    // This prevents generating unnecessary "GRANT EXECUTE TO PUBLIC" statements
-    const desiredPrivileges = filterPublicBuiltInDefaults(
-      "procedure",
-      proc.privileges,
-    );
     // Filter out owner privileges - owner always has ALL privileges implicitly
     // and shouldn't be compared. Note: we use the final owner (proc.owner), not the
     // current user, because ownership change happens before privilege diffing.
     const privilegeResults = diffPrivileges(
-      filterPublicBuiltInDefaults("procedure", creatorFilteredDefaults),
-      desiredPrivileges,
+      creatorFilteredDefaults,
+      proc.privileges,
       proc.owner,
     );
 
@@ -364,22 +366,15 @@ export function diffProcedures(
       // a name change would be handled as drop + create by diffObjects()
 
       // PRIVILEGES
-      // Filter out PUBLIC's built-in default EXECUTE privilege from main catalog
-      // (PostgreSQL grants it automatically, so we shouldn't compare it)
-      const mainPrivilegesFiltered = filterPublicBuiltInDefaults(
-        "procedure",
-        mainProcedure.privileges,
-      );
-      // Filter out PUBLIC's built-in default EXECUTE privilege from branch catalog
-      const branchPrivilegesFiltered = filterPublicBuiltInDefaults(
-        "procedure",
-        branchProcedure.privileges,
-      );
+      // Catalog extraction expands a null ACL to PostgreSQL's built-in PUBLIC
+      // EXECUTE grant. Compare the real ACLs so the common built-in cancels
+      // naturally, but an explicit revoke (its absence on one side) remains a
+      // meaningful diff.
       // Filter out owner privileges - owner always has ALL privileges implicitly
       // and shouldn't be compared. Use branch owner as the reference.
       const privilegeResults = diffPrivileges(
-        mainPrivilegesFiltered,
-        branchPrivilegesFiltered,
+        mainProcedure.privileges,
+        branchProcedure.privileges,
         branchProcedure.owner,
       );
 

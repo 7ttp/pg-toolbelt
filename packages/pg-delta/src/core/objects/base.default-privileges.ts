@@ -173,10 +173,16 @@ export class DefaultPrivilegeState {
     const objtypeState = roleState.get(objtype);
     if (!objtypeState) return [];
 
-    const defaultPrivs: PrivilegeProps[] = [];
+    const defaultPrivs = new Map<string, PrivilegeProps>();
 
-    // Check schema-specific first, then global (null schema)
-    const schemasToCheck = [objectSchema, null];
+    // PostgreSQL applies global defaults first and then adds per-schema
+    // defaults. A schema-specific entry cannot revoke a global grant, so both
+    // scopes must contribute to the effective creation ACL.
+    const schemasToCheck: Array<string | null> = [null];
+    if (objectSchema !== "") {
+      schemasToCheck.push(objectSchema);
+    }
+
     for (const schemaKey of schemasToCheck) {
       const schemaState = objtypeState.get(schemaKey);
       if (!schemaState) continue;
@@ -185,20 +191,51 @@ export class DefaultPrivilegeState {
         for (const privKey of privilegesSet) {
           const [privilege, grantableStr] = privKey.split(":");
           const grantable = grantableStr === "true";
-          defaultPrivs.push({
+          const privilegeProps: PrivilegeProps = {
             grantee,
             privilege,
             grantable,
             columns: null,
-          });
+          };
+          defaultPrivs.set(
+            `${grantee}:${privilege}:${grantable}`,
+            privilegeProps,
+          );
         }
-      }
-      // Schema-specific takes precedence, so break after first match
-      if (schemaKey === objectSchema && schemaState.size > 0) {
-        break;
       }
     }
 
-    return defaultPrivs;
+    return [...defaultPrivs.values()];
   }
+}
+
+/**
+ * Resolve the privileges a newly-created routine actually starts with.
+ *
+ * Self-contained output deliberately ignores role-configured default
+ * privileges, but PostgreSQL's built-in PUBLIC EXECUTE grant still applies and
+ * must remain the comparison baseline. Keeping it in the baseline avoids a
+ * redundant GRANT when the desired ACL retains the built-in privilege, while
+ * still making its deliberate absence produce a REVOKE.
+ *
+ * @see https://www.postgresql.org/docs/17/ddl-priv.html
+ */
+export function getRoutineCreationPrivileges(
+  state: DefaultPrivilegeState,
+  currentUser: string,
+  schema: string,
+  skipDefaultPrivilegeSubtraction = false,
+): PrivilegeProps[] {
+  if (skipDefaultPrivilegeSubtraction) {
+    return [
+      {
+        grantee: "PUBLIC",
+        privilege: "EXECUTE",
+        grantable: false,
+        columns: null,
+      },
+    ];
+  }
+
+  return state.getEffectiveDefaults(currentUser, "procedure", schema);
 }

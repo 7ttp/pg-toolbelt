@@ -1,8 +1,8 @@
 import { diffObjects } from "../base.diff.ts";
+import { getRoutineCreationPrivileges } from "../base.default-privileges.ts";
 import {
   diffPrivileges,
   emitObjectPrivilegeChanges,
-  filterPublicBuiltInDefaults,
 } from "../base.privilege-diff.ts";
 import type { ObjectDiffContext } from "../diff-context.ts";
 import { diffSecurityLabels } from "../security-label.types.ts";
@@ -29,7 +29,10 @@ import type { AggregateChange } from "./changes/aggregate.types.ts";
 export function diffAggregates(
   ctx: Pick<
     ObjectDiffContext,
-    "version" | "currentUser" | "defaultPrivilegeState"
+    | "version"
+    | "currentUser"
+    | "defaultPrivilegeState"
+    | "skipDefaultPrivilegeSubtraction"
   >,
   main: Record<string, Aggregate>,
   branch: Record<string, Aggregate>,
@@ -70,27 +73,26 @@ export function diffAggregates(
     // so objects are created with the default privileges state in effect.
     // We compare default privileges against desired privileges to generate REVOKE/GRANT statements
     // needed to reach the final desired state.
-    const effectiveDefaults = ctx.defaultPrivilegeState.getEffectiveDefaults(
+    //
+    // PostgreSQL grants PUBLIC EXECUTE on new aggregates by default. Model that
+    // grant in the creation baseline instead of filtering it from both sides:
+    // retaining it then emits nothing, while explicitly removing it emits the
+    // required REVOKE.
+    const effectiveDefaults = getRoutineCreationPrivileges(
+      ctx.defaultPrivilegeState,
       ctx.currentUser,
-      "aggregate",
       aggregate.schema ?? "",
+      ctx.skipDefaultPrivilegeSubtraction,
     );
     const creatorFilteredDefaults =
       aggregate.owner !== ctx.currentUser
         ? effectiveDefaults.filter((p) => p.grantee !== ctx.currentUser)
         : effectiveDefaults;
-    // Filter out PUBLIC's built-in default EXECUTE privilege (PostgreSQL grants it automatically)
-    // Reference: https://www.postgresql.org/docs/17/ddl-priv.html Table 5.2
-    // This prevents generating unnecessary "GRANT EXECUTE TO PUBLIC" statements
-    const desiredPrivileges = filterPublicBuiltInDefaults(
-      "aggregate",
-      aggregate.privileges,
-    );
     // Filter out owner privileges - owner always has ALL privileges implicitly
     // and shouldn't be compared. Use the aggregate owner as the reference.
     const privilegeResults = diffPrivileges(
-      filterPublicBuiltInDefaults("aggregate", creatorFilteredDefaults),
-      desiredPrivileges,
+      creatorFilteredDefaults,
+      aggregate.privileges,
       aggregate.owner,
     );
 
@@ -216,22 +218,14 @@ export function diffAggregates(
     );
 
     // PRIVILEGES
-    // Filter out PUBLIC's built-in default EXECUTE privilege from main catalog
-    // (PostgreSQL grants it automatically, so we shouldn't compare it)
-    const mainPrivilegesFiltered = filterPublicBuiltInDefaults(
-      "aggregate",
-      mainAggregate.privileges,
-    );
-    // Filter out PUBLIC's built-in default EXECUTE privilege from branch catalog
-    const branchPrivilegesFiltered = filterPublicBuiltInDefaults(
-      "aggregate",
-      branchAggregate.privileges,
-    );
+    // Aggregates share pg_proc ACL semantics with functions. Compare the real
+    // extracted ACLs so the common built-in PUBLIC EXECUTE grant cancels
+    // naturally, but an explicit revoke remains a meaningful absence.
     // Filter out owner privileges - owner always has ALL privileges implicitly
     // and shouldn't be compared. Use branch owner as the reference.
     const privilegeResults = diffPrivileges(
-      mainPrivilegesFiltered,
-      branchPrivilegesFiltered,
+      mainAggregate.privileges,
+      branchAggregate.privileges,
       branchAggregate.owner,
     );
 
