@@ -167,6 +167,73 @@ describe("accepted table rename + accepted owner-role rename (review P1 #2)", ()
       ),
     ).toBe(false);
     expect(sql).toContain('CREATE TABLE "app"."new_t" ()');
+    expect(p.acceptedRenames).toEqual([{ from: role1, to: role2 }]);
+  });
+});
+
+describe("canonical filtering vetoes partial subtree renames", () => {
+  test("a filtered desired column prevents its table rename", () => {
+    const oldColumn: StableId = {
+      kind: "column",
+      schema: "app",
+      table: "old_t",
+      name: "c",
+    };
+    const newColumn: StableId = {
+      kind: "column",
+      schema: "app",
+      table: "new_t",
+      name: "c",
+    };
+    const source = buildFactBase(
+      [
+        { id: schema, payload: {} },
+        { id: oldTable, parent: schema, payload: tablePayload() },
+        { id: oldColumn, parent: oldTable, payload: { type: "integer" } },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: schema, payload: {} },
+        { id: newTable, parent: schema, payload: tablePayload() },
+        { id: newColumn, parent: newTable, payload: { type: "integer" } },
+      ],
+      [],
+    );
+
+    const p = plan(source, desired, {
+      renames: "auto",
+      compact: false,
+      policy: {
+        id: "canonical-column-filter",
+        filter: [
+          {
+            match: {
+              all: [
+                { kind: "column" },
+                { name: "c" },
+                { idField: { field: "table", glob: "new_t" } },
+                { verb: "add" },
+              ],
+            },
+            action: "exclude",
+          },
+        ],
+      },
+    });
+
+    expect(
+      p.actions.some(
+        (action) =>
+          action.sql.includes("ALTER TABLE") &&
+          action.sql.includes("RENAME TO"),
+      ),
+    ).toBe(false);
+    expect(p.acceptedRenames).toBeUndefined();
+    expect(p.actions.map((action) => action.sql)).toContain(
+      'CREATE TABLE "app"."new_t" ()',
+    );
   });
 });
 

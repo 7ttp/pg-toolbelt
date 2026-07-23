@@ -117,6 +117,18 @@ describe("stage 9: renames", () => {
               { kind: "table" },
               { name: "old_t" },
               { owner: "renfilter_new" },
+              { verb: ["remove", "unlink"] },
+            ],
+          },
+          action: "exclude",
+        },
+        {
+          match: {
+            all: [
+              { kind: "acl" },
+              {
+                target: { kind: "table", schema: "app", name: "old_t" },
+              },
               { verb: "remove" },
             ],
           },
@@ -132,9 +144,8 @@ describe("stage 9: renames", () => {
       );
       await source.pool.query(`
         CREATE SCHEMA app;
-        CREATE TABLE app.old_t (id integer);
+        CREATE TABLE app.old_t ();
         ALTER TABLE app.old_t OWNER TO renfilter_old;
-        INSERT INTO app.old_t VALUES (7);
       `);
 
       await desiredCluster.adminPool.query(`CREATE ROLE renfilter_new NOLOGIN`);
@@ -143,7 +154,7 @@ describe("stage 9: renames", () => {
       );
       await desired.pool.query(`
         CREATE SCHEMA app;
-        CREATE TABLE app.new_t (id integer);
+        CREATE TABLE app.new_t ();
         ALTER TABLE app.new_t OWNER TO renfilter_new;
       `);
 
@@ -185,6 +196,64 @@ describe("stage 9: renames", () => {
       ]);
     }
   }, 120_000);
+
+  test("a filtered child delta vetoes its container rename and proves", async () => {
+    const dbs = await pair(
+      "ren_filter_child",
+      `CREATE SCHEMA app;
+       CREATE TABLE app.old_t (c integer);`,
+      `CREATE SCHEMA app;
+       CREATE TABLE app.new_t (c integer);`,
+    );
+    const policy: Policy = {
+      id: "canonical-column-filter",
+      filter: [
+        {
+          match: {
+            all: [
+              { kind: "column" },
+              { name: "c" },
+              { idField: { field: "table", glob: "new_t" } },
+              { verb: "add" },
+            ],
+          },
+          action: "exclude",
+        },
+      ],
+    };
+
+    try {
+      const [sourceState, desiredState] = await Promise.all([
+        extract(dbs.source.pool),
+        extract(dbs.desired.pool),
+      ]);
+      const thePlan = plan(sourceState.factBase, desiredState.factBase, {
+        renames: "auto",
+        compact: false,
+        policy,
+      });
+
+      expect(
+        thePlan.actions.some(
+          (action) =>
+            action.sql.includes("ALTER TABLE") &&
+            action.sql.includes("RENAME TO"),
+        ),
+      ).toBe(false);
+      expect(thePlan.acceptedRenames).toBeUndefined();
+
+      const verdict = await provePlan(
+        thePlan,
+        dbs.source.pool,
+        desiredState.factBase,
+      );
+      expect(verdict.applyError).toBeUndefined();
+      expect(verdict.driftDeltas).toEqual([]);
+      expect(verdict.ok).toBe(true);
+    } finally {
+      await dbs.drop();
+    }
+  }, 60_000);
 
   test("column leaf rename: emitted as RENAME COLUMN, values survive", async () => {
     const dbs = await pair(

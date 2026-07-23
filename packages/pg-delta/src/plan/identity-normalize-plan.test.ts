@@ -124,5 +124,8 @@ describe("pre-diff role identity normalization", () => {
       kind: "role",
       name: "role_b",
     });
+    expect(
+      thePlan.actions.findIndex((action) => action.sql.includes("RENAME TO")),
+    ).toBeLessThan(thePlan.actions.indexOf(policyAction!));
   });
 });
