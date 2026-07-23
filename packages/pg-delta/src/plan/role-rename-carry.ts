@@ -26,81 +26,15 @@
 import type { Delta } from "../core/diff.ts";
 import type { Fact } from "../core/fact.ts";
 import { canonicalize } from "../core/hash.ts";
-import { encodeId, type FactKind, type StableId } from "../core/stable-id.ts";
+import { encodeId, type StableId } from "../core/stable-id.ts";
+import { relabelRoleNames } from "./identity-normalize.ts";
 
-/**
- * Every `StableId` kind that embeds a role NAME (and is therefore relabeled by
- * `relabelRoleNames`). `comment` / `securityLabel` qualify only via a role
- * `target`; `acl` via its `grantee` (and a role target). A guard test
- * (role-rename-carry.test.ts) partitions the full `ALL_FACT_KINDS` inventory
- * against this set, so a NEW role-name-bearing kind cannot slip through
- * `relabelRoleNames`' default branch silently (review P3).
- */
-export const ROLE_NAME_BEARING_KINDS: ReadonlySet<FactKind> = new Set([
-  "role",
-  "membership",
-  "userMapping",
-  "defaultPrivilege",
-  "acl",
-  "comment",
-  "securityLabel",
-]);
-
-/** Build the source-role-name → dest-role-name map from accepted renames.
- *  Only role↔role renames contribute; object renames are carried elsewhere. */
-export function buildRoleRenameMap(
-  acceptedRenames: ReadonlyArray<{ from: Fact; to: Fact }>,
-): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const { from, to } of acceptedRenames) {
-    if (from.id.kind === "role" && to.id.kind === "role") {
-      map.set(
-        (from.id as { name: string }).name,
-        (to.id as { name: string }).name,
-      );
-    }
-  }
-  return map;
-}
-
-/** Remap every role NAME embedded in a stable id through an accepted role
- *  rename (source name → dest name); recurses into `target` for comment / acl /
- *  securityLabel (a comment or security label may be ON a role). Ids that embed
- *  no renamed role come back referentially unchanged in content. */
-export function relabelRoleNames(
-  id: StableId,
-  rename: ReadonlyMap<string, string>,
-): StableId {
-  const remap = (name: string): string => rename.get(name) ?? name;
-  // Each case SPREADS the original id and overrides ONLY the role-bearing
-  // field(s) (and recurses into `target`). Reconstructing an id field-by-field
-  // silently drops any field not re-listed — that regressed the `column` field
-  // of a COLUMN-level acl, making a pure role rename spuriously REVOKE/GRANT
-  // the column grant. Spreading keeps future id-field additions carried.
-  switch (id.kind) {
-    case "role":
-      return { ...id, name: remap(id.name) };
-    case "membership":
-      return { ...id, role: remap(id.role), member: remap(id.member) };
-    case "userMapping":
-      return { ...id, role: remap(id.role) };
-    case "defaultPrivilege":
-      return { ...id, role: remap(id.role), grantee: remap(id.grantee) };
-    case "acl":
-      return {
-        ...id,
-        target: relabelRoleNames(id.target, rename),
-        grantee: remap(id.grantee),
-      };
-    case "comment":
-      return { ...id, target: relabelRoleNames(id.target, rename) };
-    case "securityLabel":
-      return { ...id, target: relabelRoleNames(id.target, rename) };
-    default:
-      // object kinds (table, schema, function, …) embed no role name in their id
-      return id;
-  }
-}
+// Preserve the existing internal import surface until I1b retires carry.
+export {
+  buildRoleRenameMap,
+  relabelRoleNames,
+  ROLE_NAME_BEARING_KINDS,
+} from "./identity-normalize.ts";
 
 /** Every role NAME a stable id embeds (recursing into comment/acl/securityLabel
  *  targets). Used to order a post-rename mutation AFTER the role rename by

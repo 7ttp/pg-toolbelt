@@ -5,18 +5,12 @@
 import { describe, expect, test } from "bun:test";
 import type { Delta } from "../core/diff.ts";
 import { buildFactBase, type Fact } from "../core/fact.ts";
-import {
-  ALL_FACT_KINDS,
-  encodeId,
-  type FactKind,
-  type StableId,
-} from "../core/stable-id.ts";
+import { encodeId, type StableId } from "../core/stable-id.ts";
 import {
   buildRoleRenameMap,
   computeRoleRenameCarry,
   ownerEdgeKey,
   relabelRoleNames,
-  ROLE_NAME_BEARING_KINDS,
   roleNamesIn,
 } from "./role-rename-carry.ts";
 import { plan } from "./plan.ts";
@@ -424,92 +418,5 @@ describe("roleNamesIn", () => {
     expect([
       ...roleNamesIn({ kind: "table", schema: "app", name: "t" }),
     ]).toEqual([]);
-  });
-});
-
-describe("role-name-bearing kind registry (review P3 guard)", () => {
-  // every StableId kind must be classified as role-name-bearing or not; a NEW
-  // kind added to ALL_FACT_KINDS lands here and fails until it is triaged.
-  const NON_ROLE_BEARING: ReadonlySet<FactKind> = new Set([
-    "schema",
-    "extension",
-    "language",
-    "eventTrigger",
-    "publication",
-    "subscription",
-    "fdw",
-    "server",
-    "table",
-    "view",
-    "materializedView",
-    "foreignTable",
-    "sequence",
-    "index",
-    "collation",
-    "domain",
-    "type",
-    "column",
-    "constraint",
-    "trigger",
-    "rule",
-    "policy",
-    "default",
-    "function",
-    "procedure",
-    "aggregate",
-    "typeAttribute",
-    "publicationRel",
-    "publicationSchema",
-    // extension intent ids carry ext/intentKind/key only; any role reference
-    // (e.g. a cron job's `username`) lives in the payload, not the id, so no
-    // role name is relabeled — same honest blind spot as function bodies.
-    "extensionIntent",
-  ]);
-
-  test("ROLE_NAME_BEARING_KINDS and NON_ROLE_BEARING partition ALL_FACT_KINDS", () => {
-    for (const kind of ALL_FACT_KINDS) {
-      const bearing = ROLE_NAME_BEARING_KINDS.has(kind);
-      const nonBearing = NON_ROLE_BEARING.has(kind);
-      // exactly one of the two sets must claim the kind
-      expect(bearing !== nonBearing).toBe(true);
-    }
-    expect(ROLE_NAME_BEARING_KINDS.size + NON_ROLE_BEARING.size).toBe(
-      ALL_FACT_KINDS.length,
-    );
-  });
-
-  test("relabelRoleNames actually transforms every role-name-bearing kind", () => {
-    // each bearing kind, given an id that references the renamed role, must come
-    // back CHANGED — i.e. it is handled in the switch, not the default branch
-    const samples: Record<string, StableId> = {
-      role: { kind: "role", name: "r1" },
-      membership: { kind: "membership", role: "r1", member: "x" },
-      userMapping: { kind: "userMapping", server: "s", role: "r1" },
-      defaultPrivilege: {
-        kind: "defaultPrivilege",
-        role: "r1",
-        schema: null,
-        objtype: "r",
-        grantee: "PUBLIC",
-      },
-      acl: {
-        kind: "acl",
-        target: { kind: "table", schema: "a", name: "t" },
-        grantee: "r1",
-      },
-      comment: { kind: "comment", target: { kind: "role", name: "r1" } },
-      securityLabel: {
-        kind: "securityLabel",
-        target: { kind: "role", name: "r1" },
-        provider: "p",
-      },
-    };
-    for (const kind of ROLE_NAME_BEARING_KINDS) {
-      const sample = samples[kind];
-      expect(sample, `missing sample for ${kind}`).toBeDefined();
-      expect(encodeId(relabelRoleNames(sample!, rename))).not.toBe(
-        encodeId(sample!),
-      );
-    }
   });
 });

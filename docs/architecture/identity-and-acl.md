@@ -66,8 +66,9 @@ role OID. Ownership, grants, memberships, user mappings, and policy role lists
 continue to reference that OID. Re-extraction reports `new` everywhere even
 though pg-delta's pre-rename facts were keyed by `old`.
 
-The current StableId role-name registry is
-[`ROLE_NAME_BEARING_KINDS`](../../packages/pg-delta/src/plan/role-rename-carry.ts):
+The StableId role-name registry now lives with the dark I1a normalizer at
+[`ROLE_NAME_BEARING_KINDS`](../../packages/pg-delta/src/plan/identity-normalize.ts).
+Pipeline integration remains deferred to I1b:
 
 | Kind | Role-bearing identity fields |
 |---|---|
