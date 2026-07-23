@@ -239,6 +239,70 @@ describe("action-shape budget enforcement", () => {
     ).not.toThrow();
   });
 
+  test("classifies ADD IDENTITY by its altered column, not its produced sequence", () => {
+    const column: StableId = {
+      kind: "column",
+      schema: "public",
+      table: "items",
+      name: "id",
+    };
+    const sequence: StableId = {
+      kind: "sequence",
+      schema: "public",
+      name: "items_id_seq",
+    };
+    const budget = parseActionShapeBudget(
+      { "a-to-b": { require: ["alter:column"] } },
+      "add identity budget",
+    );
+
+    expect(() =>
+      enforceActionShapeBudget(
+        [
+          action("alter", {
+            produces: [sequence],
+            consumes: [column],
+          }),
+        ],
+        budget,
+        "identity-add",
+        "forward",
+      ),
+    ).not.toThrow();
+  });
+
+  test("classifies DROP IDENTITY by its altered column, not its destroyed sequence", () => {
+    const column: StableId = {
+      kind: "column",
+      schema: "public",
+      table: "items",
+      name: "id",
+    };
+    const sequence: StableId = {
+      kind: "sequence",
+      schema: "public",
+      name: "items_id_seq",
+    };
+    const budget = parseActionShapeBudget(
+      { "a-to-b": { require: ["alter:column"] } },
+      "drop identity budget",
+    );
+
+    expect(() =>
+      enforceActionShapeBudget(
+        [
+          action("alter", {
+            consumes: [column],
+            destroys: [sequence],
+          }),
+        ],
+        budget,
+        "identity-drop",
+        "forward",
+      ),
+    ).not.toThrow();
+  });
+
   test("expected failures are self-expiring", () => {
     const expectedRed = parseActionShapeBudget(
       {

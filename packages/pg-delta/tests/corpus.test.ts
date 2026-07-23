@@ -29,4 +29,19 @@ describe("loadCorpus action-shape budgets", () => {
       },
     });
   });
+
+  test("pins storage extraction without allowing destructive replacements", () => {
+    const scenario = loadCorpus().find(
+      (entry) => entry.name === "column-operations--storage",
+    );
+
+    expect(scenario?.actionShapeBudget?.["a-to-b"]?.forbid).toEqual([
+      { shape: "replacement", kind: "column" },
+      { shape: "replacement", kind: "table" },
+    ]);
+    expect(scenario?.actionShapeBudget?.["b-to-a"]?.forbid).toEqual([
+      { shape: "replacement", kind: "column" },
+      { shape: "replacement", kind: "table" },
+    ]);
+  });
 });
