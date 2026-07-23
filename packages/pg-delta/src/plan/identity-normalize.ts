@@ -90,7 +90,8 @@ function normalizePayload(
 /**
  * Rewrite role-name-bearing identity into the desired (post-rename) namespace.
  *
- * I1a ships this pure normalizer dark; pipeline integration belongs to I1b.
+ * The planner applies this after its policy-filtered rename discovery pass and
+ * before the canonical diff that drives actions.
  */
 export function normalizeRoleIdentities(
   fb: FactBase,

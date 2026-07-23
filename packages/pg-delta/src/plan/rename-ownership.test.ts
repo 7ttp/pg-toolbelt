@@ -294,6 +294,10 @@ describe("role rename carries role-name-bearing facts with CHANGED payloads (rev
     // the old-name teardown (with CASCADE) must be gone
     expect(sql.some((s) => s.includes("CASCADE"))).toBe(false);
     expect(sql.some((s) => s.includes('FROM "r1"'))).toBe(false);
+    const membershipAlter = p.actions.find((action) =>
+      action.sql.includes("WITH ADMIN OPTION"),
+    );
+    expect(membershipAlter?.consumes).toContainEqual(role2);
   });
 
   test("membership.admin true→false: REVOKE ADMIN OPTION on r2, no drop/recreate", () => {
@@ -360,6 +364,43 @@ describe("role rename carries role-name-bearing facts with CHANGED payloads (rev
     ).toBe(true);
     expect(sql.some((s) => s.includes("DROP USER MAPPING"))).toBe(false);
     expect(sql.some((s) => s.includes("CREATE USER MAPPING"))).toBe(false);
+    const mappingAlter = p.actions.find((action) =>
+      action.sql.includes("ALTER USER MAPPING"),
+    );
+    expect(mappingAlter?.consumes).toContainEqual(role2);
+  });
+
+  test("userMapping removal after rename targets and consumes r2", () => {
+    const srv: StableId = { kind: "server", name: "srv" };
+    const source = buildFactBase(
+      [
+        { id: role1, payload: rolePayload(false) },
+        { id: srv, payload: { fdw: "postgres_fdw", options: [] } },
+        {
+          id: { kind: "userMapping", server: "srv", role: "r1" },
+          parent: srv,
+          payload: { options: [] },
+        },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: role2, payload: rolePayload(false) },
+        { id: srv, payload: { fdw: "postgres_fdw", options: [] } },
+      ],
+      [],
+    );
+
+    const p = plan(source, desired, { renames: "auto", compact: false });
+    const mappingDrop = p.actions.find((action) =>
+      action.sql.includes("DROP USER MAPPING"),
+    );
+    expect(mappingDrop?.sql).toContain('FOR "r2"');
+    expect(mappingDrop?.consumes).toContainEqual(role2);
+    expect(p.actions.indexOf(mappingDrop!)).toBeGreaterThan(
+      p.actions.findIndex((action) => action.sql.includes("RENAME TO")),
+    );
   });
 
   test("acl privilege change: no pre-rename REVOKE FROM r1; replacement targets r2", () => {
