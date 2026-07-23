@@ -235,6 +235,63 @@ describe("canonical filtering vetoes partial subtree renames", () => {
       'CREATE TABLE "app"."new_t" ()',
     );
   });
+
+  test("an orphaned filtered source child does not veto the table rename", () => {
+    const oldColumn: StableId = {
+      kind: "column",
+      schema: "app",
+      table: "old_t",
+      name: "c",
+    };
+    const newColumn: StableId = {
+      kind: "column",
+      schema: "app",
+      table: "new_t",
+      name: "c",
+    };
+    const source = buildFactBase(
+      [
+        { id: schema, payload: {} },
+        { id: oldTable, parent: schema, payload: tablePayload() },
+        { id: oldColumn, parent: oldTable, payload: { type: "integer" } },
+      ],
+      [],
+    );
+    const desired = buildFactBase(
+      [
+        { id: schema, payload: {} },
+        { id: newTable, parent: schema, payload: tablePayload() },
+        { id: newColumn, parent: newTable, payload: { type: "integer" } },
+      ],
+      [],
+    );
+
+    const p = plan(source, desired, {
+      renames: "auto",
+      compact: false,
+      policy: {
+        id: "orphaned-source-column-filter",
+        filter: [
+          {
+            match: {
+              all: [
+                { kind: "column" },
+                { name: "c" },
+                { idField: { field: "table", glob: "old_t" } },
+                { verb: "remove" },
+              ],
+            },
+            action: "exclude",
+          },
+        ],
+      },
+    });
+
+    expect(p.actions.map((action) => action.sql)).toEqual([
+      'ALTER TABLE "app"."old_t" RENAME TO "new_t"',
+    ]);
+    expect(p.acceptedRenames).toEqual([{ from: oldTable, to: newTable }]);
+  });
 });
 
 const stableTable: StableId = { kind: "table", schema: "app", name: "t" };

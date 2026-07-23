@@ -255,6 +255,62 @@ describe("stage 9: renames", () => {
     }
   }, 60_000);
 
+  test("an orphaned filtered source child preserves its container rename and data", async () => {
+    const dbs = await pair(
+      "ren_filter_orphan",
+      `CREATE SCHEMA app;
+       CREATE TABLE app.old_t (c integer);
+       INSERT INTO app.old_t VALUES (42);`,
+      `CREATE SCHEMA app;
+       CREATE TABLE app.new_t (c integer);`,
+    );
+    const policy: Policy = {
+      id: "orphaned-source-column-filter",
+      filter: [
+        {
+          match: {
+            all: [
+              { kind: "column" },
+              { name: "c" },
+              { idField: { field: "table", glob: "old_t" } },
+              { verb: "remove" },
+            ],
+          },
+          action: "exclude",
+        },
+      ],
+    };
+
+    try {
+      const [sourceState, desiredState] = await Promise.all([
+        extract(dbs.source.pool),
+        extract(dbs.desired.pool),
+      ]);
+      const thePlan = plan(sourceState.factBase, desiredState.factBase, {
+        renames: "auto",
+        compact: false,
+        policy,
+      });
+
+      expect(thePlan.actions.map((action) => action.sql)).toEqual([
+        'ALTER TABLE "app"."old_t" RENAME TO "new_t"',
+      ]);
+      const verdict = await provePlan(
+        thePlan,
+        dbs.source.pool,
+        desiredState.factBase,
+      );
+      expect(verdict.applyError).toBeUndefined();
+      expect(verdict.driftDeltas).toEqual([]);
+      expect(verdict.dataViolations).toEqual([]);
+      expect(verdict.ok).toBe(true);
+      const rows = await dbs.source.pool.query(`SELECT c FROM app.new_t`);
+      expect(rows.rows).toEqual([{ c: 42 }]);
+    } finally {
+      await dbs.drop();
+    }
+  }, 60_000);
+
   test("column leaf rename: emitted as RENAME COLUMN, values survive", async () => {
     const dbs = await pair(
       "ren_col",
