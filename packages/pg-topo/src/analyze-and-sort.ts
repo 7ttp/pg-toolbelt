@@ -221,6 +221,7 @@ export const analyzeAndSort = async (
     }
   }
 
+  // `orderedIndices` is a total order of every successfully parsed statement.
   const ordered = topoResult.orderedIndices
     .map((index) => statementNodes[index])
     .filter((statementNode): statementNode is StatementNode =>
