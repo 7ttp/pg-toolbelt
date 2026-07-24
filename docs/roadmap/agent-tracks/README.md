@@ -10,6 +10,32 @@ examples, and schematics for each big step.
 **Commit this folder before delegating** — untracked briefs are invisible to
 agents in fresh worktrees.
 
+## Status — execution complete (2026-07-24)
+
+All scheduled tracks in this roadmap have been implemented. There is no next
+delegation from this folder.
+
+| Track | Status | Evidence |
+|---|---|---|
+| D0 | Complete | Docs metrics and boundary wording landed in `fdbb7b4c` (#348) |
+| B1 | Complete | Role-rename/policy cycle fix landed in `732dd535` (#349) |
+| V1 | Complete | Managed-view reconstruction landed in `cf80086f` (#351) |
+| I1a / I1b | Complete | Role identity normalization and integration landed in `6e48729b` through `7927a95f` |
+| I2 | Complete | Identity and ACL invariants landed in `a537d02a` (#353) |
+| P1 | Complete | Corpus action-shape budgets landed in `3f9dd436`, with follow-up hardening in `92f16e9c` |
+| P2a / P2b | Complete | Attributed projection audit landed in `d2a7d4d2` (#355) and proof surfacing in `38aaa40c` |
+| P3 | Complete | Auto-seed outcomes and coverage contract landed in `a987a74a` (#350), followed by proof hardening |
+| C1 | Complete | Compact and uncompacted corpus proof landed in `0a207a74` (#356) |
+| H1 | Complete | Planner kind-check ratchet landed in `6299d70f` and `d85bb168` |
+| C2 | Parked | Evidence gate has not been met; do not open as an aesthetic cleanup |
+| H2 | Parked | Evidence gate has not been met; do not delegate |
+| K1 | Retired | The boundary already exists; remaining wording was folded into D0 |
+
+New correctness work should come from the live backlogs linked below or from a
+new, evidence-backed brief. Reopen C2 only for a concrete compact/uncompact
+divergence or a compaction elision implicated in a bug. Reopen H2 only when one
+of its documented evidence conditions is met.
+
 ## Cross-links to live correctness backlog
 
 This folder is scoped to **architecture hygiene** from the Jul reviews. It does
@@ -22,7 +48,10 @@ scenarios, prefer concrete issues:
 Especially relevant to **P1** (known-bad action shapes) and **I1** (rename
 identity scenarios).
 
-## Dependency graph
+## Historical dependency graph
+
+The graph below records the ordering used to execute the completed roadmap. It
+is retained for architectural context, not as an active delegation queue.
 
 ```text
 D0 (docs metrics) ─────────────────────────────────────────── anytime
@@ -55,11 +84,11 @@ K1 RETIRED — boundary already exists; docs wording folded into D0
 I2 docs anytime (avoid colliding with I1 identity docs)
 ```
 
-## Parallel waves
+## Historical parallel waves
 
-Wave numbers are **conflict groupings, not strict chronology** — the
-[Suggested first delegation](#suggested-first-delegation) section is the
-authoritative order (notably: C1 preferably lands *before* I1).
+Wave numbers were **conflict groupings, not strict chronology**. The dependency
+graph above records the authoritative execution order (notably: C1 landed
+before I1).
 
 | Wave | Ship together? | Tracks | Notes |
 |---|---|---|---|
@@ -84,17 +113,16 @@ authoritative order (notably: C1 preferably lands *before* I1).
 | P3 vs P2 | P3's `autoSeedEmptyTables` touch vs P2 owning `prove.ts` — serialize |
 | D0, I2 | almost nothing |
 
-## Suggested first delegation
+## Closeout guidance
 
-1. **Agent A → B1** (urgent bug) and **Agent B → V1**, in parallel (disjoint files)
-2. **Agent C → D0** (parallel with anything); **Agent D → P3** also fine now —
-   but P3 must **land before C1 starts, or stack on C1's branch**
-   (`engine.test.ts` single owner); don't open both the same day unstacked
-3. After V1 (and P3 landed or stacked): **Agent E → C1** (dual-prove);
-   parallel **Agent F → P1** (semantic budgets)
-4. After B1 + V1: **Agent G → I1a** (pure normalizer, ships dark)
-5. After C1 + I1a: **Agent H → I1b** (integration; corpus gate covers both
-   compact modes); **P2a → P2b** any time after V1 as sole `prove.ts` owner
+- Do not select another implementation track from this folder: every scheduled
+  track is complete.
+- Keep C2 parked until dual-prove exposes a compact/uncompact divergence or a
+  specific compaction elision is implicated in a bug.
+- Keep H2 parked until one of the evidence conditions in its brief is met.
+- Keep K1 retired; do not recreate work for the existing boundary.
+- For new work, start from the live correctness backlog or write a new brief
+  with current evidence, ownership, RED → GREEN coverage, and dependencies.
 
 ## Review amendments (2026-07-20)
 
