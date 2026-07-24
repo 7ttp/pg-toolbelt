@@ -42,6 +42,7 @@ export {
 
 export {
   renderPlanFiles,
+  isDestructiveAction,
   type RenderPlanFilesOptions,
   type RenderPlanFilesResult,
   type RenderedPlanFile,

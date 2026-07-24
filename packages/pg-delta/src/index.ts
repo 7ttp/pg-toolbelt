@@ -57,8 +57,10 @@ export { type LockClass } from "./plan/locks.ts";
 // ── apply ────────────────────────────────────────────────────────────────────
 export {
   apply,
+  type ApplyError,
   type ApplyReport,
   type ApplyOptions,
+  type ApplyEvent,
   type ActionStatus,
 } from "./apply/apply.ts";
 
@@ -105,6 +107,7 @@ export {
 } from "./frontends/schema-plan.ts";
 export {
   renderPlanFiles,
+  isDestructiveAction,
   type RenderPlanFilesOptions,
   type RenderPlanFilesResult,
   type RenderedPlanFile,

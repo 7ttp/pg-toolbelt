@@ -22,6 +22,7 @@
  * schema apply --dir <dir> [--shadow <pg-url>] --target <pg-url>
  *              [--renames auto|prompt|off] [--force]
  *              [--accept-rename <from>=<to>] (repeatable) [--no-reorder]
+ *              [--dry-run] [--verbose] [--out-plan <plan.json>]
  *   Read .sql files recursively (lexicographic), load into shadow, extract
  *   target, plan, apply.  Maps to old `declarative-apply` / `sync`.
  *
@@ -39,6 +40,41 @@
  *   --accept-rename <from>=<to>
  *     Confirm one rename candidate by the encoded stable-ids shown in a prior
  *     --renames prompt run.  Repeatable; each flag names one confirmed rename.
+ *
+ *   The statements actually applied to the target are NOT the authored
+ *   declarative SQL: the planner re-derives atomic DDL from the catalog diff
+ *   between the shadow (desired) and target (current) states. --verbose shows
+ *   every statement actually executed on the target connection — including
+ *   transaction framing (BEGIN/COMMIT/ROLLBACK) and session SETs — never the
+ *   authored files; --dry-run prints a portable executable script containing
+ *   the same successful-path statements and segment boundaries, without
+ *   applying them. It must be dispatched statement by statement on one session,
+ *   stopping at the first error, with autocommit outside its explicit
+ *   transaction blocks; never submit it as one multi-statement request or wrap
+ *   the whole script in one transaction.
+ *
+ *   --dry-run
+ *     Plan as usual, then print the executable portable SQL script to STDOUT
+ *     instead of calling apply() — no fingerprint gate runs, nothing is
+ *     applied. Execute it statement by statement on one session and stop on
+ *     the first error; preserve autocommit outside its explicit transaction
+ *     blocks. A stderr summary reports the action count and flags any
+ *     destructive actions. Composes with --out-plan; --force is a no-op since
+ *     the gate never runs, and --verbose has no effect (nothing executes, so
+ *     there is no trace).
+ *   --verbose
+ *     During the real apply, stream a segment/action-level progress trace to
+ *     STDERR: segment start/end (with outcome), every planner-rendered action
+ *     (the SQL about to run and whether it succeeded, with wall-clock timing),
+ *     AND every other statement sent on the same connection — BEGIN, preamble
+ *     SET/SET LOCAL, COMMIT, ROLLBACK, RESET ALL — prefixed `  ; ` to stay
+ *     visually distinct from action lines. Wraps apply()'s `onEvent` observer
+ *     hook (src/apply/apply.ts) — purely additive, never changes what gets
+ *     applied or the final report.
+ *   --out-plan <plan.json>
+ *     Write the plan artifact (the same format `plan --out` produces) to this
+ *     path right after planning, before apply (or the --dry-run script). Useful
+ *     for inspecting/archiving the exact plan a `schema apply` run executed.
  */
 import type { Pool } from "pg";
 import {
@@ -59,7 +95,10 @@ import {
   readExportManifest,
   writeExportManifest,
 } from "../../frontends/export-manifest.ts";
-import { type SqlFile } from "../../frontends/load-sql-files.ts";
+import {
+  ShadowLoadError,
+  type SqlFile,
+} from "../../frontends/load-sql-files.ts";
 import { analyzeForShadow } from "../../frontends/sql-order.ts";
 import { buildSchemaExport } from "../../frontends/schema-export.ts";
 import {
@@ -71,8 +110,11 @@ import {
   formatLintReport,
   rewriteReorderedShadowError,
 } from "../reorder-display.ts";
+import { serializePlan } from "../../plan/artifact.ts";
 import type { ManagementScope } from "../../policy/view.ts";
-import { apply } from "../../apply/apply.ts";
+import { apply, type ApplyEvent } from "../../apply/apply.ts";
+import { renderApplyScript } from "../../frontends/render-apply-script.ts";
+import { isDestructiveAction } from "../render.ts";
 import { encodeId, parseId, type StableId } from "../../core/stable-id.ts";
 import { exitIfBlocking, printDiagnostics } from "../diagnostics.ts";
 import { makePool } from "../pool.ts";
@@ -454,6 +496,41 @@ export function prepareApplyFiles(
   return prepared;
 }
 
+/** Warn whenever a schema-apply output surface can expose cleartext secrets.
+ *  The caller passes the EFFECTIVE redaction mode, already reconciled with the
+ *  export manifest, so flag- and manifest-driven unsafe modes cannot drift. */
+function warnIfUnredactedOutput(
+  redactSecrets: boolean,
+  output:
+    | "plan artifact"
+    | "dry-run script"
+    | "verbose output"
+    | "planning failure diagnostic"
+    | "failure diagnostic",
+): void {
+  if (!redactSecrets) {
+    process.stderr.write(
+      `  WARNING: secrets are unredacted (--unsafe-show-secrets or the export manifest) — the ${output} may contain unredacted credentials.\n`,
+    );
+  }
+}
+
+/** True only when a shadow-load failure can surface an authored statement.
+ *  Early policy/connection/empty-shadow failures do not carry statement text
+ *  and therefore do not need the unredacted-output warning. */
+function hasShadowStatementDiagnostic(
+  error: unknown,
+): error is ShadowLoadError {
+  return (
+    error instanceof ShadowLoadError &&
+    error.details.some(
+      (detail) =>
+        detail.code === "stuck_statement" ||
+        detail.code === "max_rounds_exceeded",
+    )
+  );
+}
+
 export async function cmdSchemaApply(args: string[]): Promise<void> {
   let parsed;
   try {
@@ -474,6 +551,9 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       scope: { type: "value" },
       "skip-cluster-ddl": { type: "boolean" },
       "keep-shadow": { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      verbose: { type: "boolean" },
+      "out-plan": { type: "value" },
       "allow-data-loss": { type: "boolean" },
       "trusted-local-host": { type: "multi" },
       "allow-remote-shadow": { type: "boolean" },
@@ -485,6 +565,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
           `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... ` +
           `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--strict-coverage] [--strict-function-bodies] [--no-reorder] [--unsafe-show-secrets] [--isolated-shadow] [--scope database|cluster] [--skip-cluster-ddl] [--keep-shadow] [--allow-data-loss] ` +
           `[--trusted-local-host <hostname>]... [--allow-remote-shadow]\n` +
+          `  [--dry-run] (print the portable apply script to stdout; apply nothing; see pgdelta --help for execution requirements) [--verbose] (stream per-statement progress to stderr) [--out-plan <plan.json>] (write the plan artifact)\n` +
           `  --shadow omitted: a co-located shadow database is created on the target's cluster (database scope only) and dropped after.`,
       );
     }
@@ -497,6 +578,9 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   const targetUrl = flags["target"];
   const force = flags["force"];
   const acceptRenameRaw = flags["accept-rename"];
+  const dryRun = flags["dry-run"];
+  const verbose = flags["verbose"];
+  const outPlanPath = flags["out-plan"];
 
   // The export directory's manifest (redaction mode, profile, scope), consulted
   // once and reused. Absent for hand-authored dirs / older exports.
@@ -775,6 +859,11 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         }
         return enriched;
       },
+    }).catch((error: unknown) => {
+      if (hasShadowStatementDiagnostic(error)) {
+        warnIfUnredactedOutput(redactSecrets, "planning failure diagnostic");
+      }
+      throw error;
     });
 
     printDiagnostics(planned.loadDiagnostics, { label: "shadow" });
@@ -808,8 +897,42 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       process.stderr.write("\n");
     }
 
+    // --out-plan: archive the plan artifact right after planning, regardless
+    // of whether the run goes on to --dry-run's script or a real apply.
+    if (outPlanPath !== undefined) {
+      warnIfUnredactedOutput(redactSecrets, "plan artifact");
+      writeFileSync(outPlanPath, serializePlan(thePlan), "utf8");
+      process.stderr.write(`Plan artifact written to ${outPlanPath}\n`);
+    }
+
     if (thePlan.actions.length === 0) {
       process.stderr.write("Target is already up to date.\n");
+      return;
+    }
+
+    if (dryRun) {
+      const script = renderApplyScript(thePlan, {
+        ...(planned.applyOptions.lockTimeoutMs !== undefined
+          ? { lockTimeoutMs: planned.applyOptions.lockTimeoutMs }
+          : {}),
+        ...(planned.applyOptions.statementTimeoutMs !== undefined
+          ? { statementTimeoutMs: planned.applyOptions.statementTimeoutMs }
+          : {}),
+      });
+      // The script is routinely redirected to a file, making it as persistent
+      // as an archived plan artifact. Warn before stdout can expose it.
+      warnIfUnredactedOutput(redactSecrets, "dry-run script");
+      process.stdout.write(script);
+      process.stderr.write(
+        `Dry run: ${thePlan.actions.length} action(s) planned; nothing applied.\n`,
+      );
+      const destructiveCount =
+        thePlan.actions.filter(isDestructiveAction).length;
+      if (destructiveCount > 0) {
+        process.stderr.write(
+          `WARNING: plan contains ${destructiveCount} destructive action(s).\n`,
+        );
+      }
       return;
     }
 
@@ -824,15 +947,67 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       );
     }
 
+    // A real verbose apply writes every action SQL to stderr. Warn after the
+    // dry-run early return (where --verbose has no effect) and before the first
+    // action can expose a credential.
+    if (verbose) {
+      warnIfUnredactedOutput(redactSecrets, "verbose output");
+    }
+
     if (force) {
       process.stderr.write("WARNING: --force disables the fingerprint gate.\n");
     }
+
+    // --verbose: stream per-segment/per-action progress to stderr as apply()
+    // executes. Purely additive (apply.ts's `onEvent` is guarded against a
+    // throwing observer) — never changes what gets applied or the report.
+    // `segmentEnd` doesn't carry the segment count, so remember it from the
+    // most recent `segmentStart` (events for one apply() call arrive in order).
+    let lastSegmentCount = 1;
+    const onEvent = verbose
+      ? (event: ApplyEvent): void => {
+          switch (event.kind) {
+            case "segmentStart":
+              lastSegmentCount = event.segmentCount;
+              process.stderr.write(
+                `-- segment ${event.segmentIndex + 1}/${event.segmentCount} (${
+                  event.transactional ? "transactional" : "non-transactional"
+                }), ${event.end - event.start} action(s)\n`,
+              );
+              break;
+            case "actionStart":
+              process.stderr.write(
+                `[${event.actionIndex + 1}/${thePlan.actions.length}] ${event.sql}\n`,
+              );
+              break;
+            case "actionEnd":
+              process.stderr.write(
+                `[${event.actionIndex + 1}/${thePlan.actions.length}] ${
+                  event.ok ? `ok (${event.ms}ms)` : `FAILED (${event.ms}ms)`
+                }\n`,
+              );
+              break;
+            case "segmentEnd":
+              process.stderr.write(
+                `-- segment ${event.segmentIndex + 1}/${lastSegmentCount} ${event.outcome}\n`,
+              );
+              break;
+            case "control":
+              // every OTHER statement apply() sends on the wire — BEGIN,
+              // preamble SET/SET LOCAL, COMMIT, ROLLBACK, RESET ALL — prefixed
+              // to stay visually distinct from `[i/total] <action sql>` lines.
+              process.stderr.write(`  ; ${event.sql}\n`);
+              break;
+          }
+        }
+      : undefined;
 
     const report = await apply(thePlan, tgt.pool, {
       ...planned.applyOptions,
       reextract: (p) =>
         planned.extract(p, { redactSecrets: planned.redactSecrets }),
       fingerprintGate: !force,
+      ...(onEvent !== undefined ? { onEvent } : {}),
     });
 
     if (report.status === "applied") {
@@ -842,9 +1017,17 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
     } else {
       process.stderr.write("Apply failed!\n");
       if (report.error) {
-        process.stderr.write(
-          `  action[${report.error.actionIndex}]: ${report.error.message}\n`,
-        );
+        // Non-verbose applies have not exposed action SQL yet. PostgreSQL's
+        // error message can echo that SQL, so warn before the entire failure
+        // diagnostic. Verbose mode already warned before its actionStart trace.
+        if (!verbose) {
+          warnIfUnredactedOutput(redactSecrets, "failure diagnostic");
+        }
+        const subject =
+          (report.error.statementKind ?? "action") === "action"
+            ? `action[${report.error.actionIndex}]`
+            : "control";
+        process.stderr.write(`  ${subject}: ${report.error.message}\n`);
         process.stderr.write(`  sql: ${report.error.sql}\n`);
       }
       // The finally below releases resources (drops any co-located shadow);

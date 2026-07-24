@@ -32,6 +32,7 @@ import type {
   ProjectionAuditEntry,
   ProjectionAuditStage,
 } from "../../plan/plan.ts";
+import type { ApplyError } from "../../apply/apply.ts";
 
 const baseVerdict = (): ProofVerdict => ({
   ok: false,
@@ -680,6 +681,22 @@ describe("formatProjectionAudit", () => {
 });
 
 describe("formatProofFailure (review P2)", () => {
+  test("treats a legacy ApplyError without statementKind as an action", () => {
+    const legacyApplyError: ApplyError = {
+      actionIndex: 2,
+      sql: "ALTER TABLE app.t ADD COLUMN value text",
+      message: "legacy failure",
+    };
+    const verdict: ProofVerdict = {
+      ...baseVerdict(),
+      applyError: legacyApplyError,
+    };
+
+    expect(formatProofFailure(verdict)).toContain(
+      "apply error at action[2]: legacy failure",
+    );
+  });
+
   test("renders an intrinsically destructive subobject metadata failure", () => {
     const verdict: ProofVerdict = {
       ...baseVerdict(),

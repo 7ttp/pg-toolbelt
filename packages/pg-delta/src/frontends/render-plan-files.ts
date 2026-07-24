@@ -35,6 +35,16 @@ export interface RenderPlanFilesResult {
   files: RenderedPlanFile[];
 }
 
+/** The planner marks destructive work two ways: a `drop` verb, or a non-drop
+ *  verb flagged `dataLoss: "destructive"` (e.g. an enum value-set migration
+ *  that rewrites dependent columns — verb `alter`). Shared by the render gate
+ *  below and `schema apply --dry-run`'s warning so the predicate cannot drift. */
+export function isDestructiveAction(
+  action: Pick<Plan["actions"][number], "verb" | "dataLoss">,
+): boolean {
+  return action.verb === "drop" || action.dataLoss === "destructive";
+}
+
 /** Normalize action SQL to end with exactly one semicolon (action.sql may or
  *  may not already have a trailing `;`, and may have trailing whitespace). */
 function terminate(sql: string): string {
@@ -56,9 +66,7 @@ export function renderPlanFiles(
   }
 
   if (!opts.allowDrops) {
-    const offender = plan.actions.find(
-      (a) => a.verb === "drop" || a.dataLoss === "destructive",
-    );
+    const offender = plan.actions.find(isDestructiveAction);
     if (offender !== undefined) {
       const why =
         offender.verb === "drop" ? "a drop action" : "a destructive action";

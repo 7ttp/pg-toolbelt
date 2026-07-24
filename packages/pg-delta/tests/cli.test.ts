@@ -17,7 +17,7 @@ import {
 import { loadSnapshot } from "../src/frontends/snapshot-file.ts";
 import { serializeSnapshot } from "../src/core/snapshot.ts";
 import { extract } from "../src/extract/extract.ts";
-import { serializePlan } from "../src/plan/artifact.ts";
+import { parsePlan, serializePlan } from "../src/plan/artifact.ts";
 import { plan } from "../src/plan/plan.ts";
 import type { Policy } from "../src/policy/policy.ts";
 import { isolatedClusterPair, sharedCluster } from "./containers.ts";
@@ -29,6 +29,17 @@ interface SpawnResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+function expectDryRunStdoutIsScript(stdout: string): void {
+  for (const diagnostic of [
+    "Dry run:",
+    "WARNING:",
+    "Plan artifact written",
+    "UNREDACTED",
+  ]) {
+    expect(stdout).not.toContain(diagnostic);
+  }
 }
 
 async function runCli(args: string[]): Promise<SpawnResult> {
@@ -89,6 +100,44 @@ describe("CLI: error → exit-code mapping (main is the sole exiter)", () => {
     // the command-specific usage hint still rides along on the same message
     expect(res.stderr).toMatch(/Usage: pgdelta snapshot/);
   });
+});
+
+describe("CLI: apply failure attribution", () => {
+  test("renders a failing preamble statement as a control, not an action", async () => {
+    const cluster = await sharedCluster();
+    const target = await cluster.createDb("cli_apply_control_tgt");
+    const desired = await cluster.createDb("cli_apply_control_desired");
+    const artifactDir = mkdtempSync(join(tmpdir(), "pgdn-apply-control-"));
+    try {
+      await desired.pool.query(`CREATE SCHEMA app`);
+      const [sourceState, desiredState] = await Promise.all([
+        extract(target.pool),
+        extract(desired.pool),
+      ]);
+      const thePlan = plan(sourceState.factBase, desiredState.factBase);
+      thePlan.preamble = [{ name: "lock_timeout", value: "-1" }];
+      const planFile = join(artifactDir, "plan.json");
+      writeFileSync(planFile, serializePlan(thePlan), "utf8");
+
+      const result = await runCli([
+        "apply",
+        "--plan",
+        planFile,
+        "--target",
+        target.uri,
+        "--force",
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(/  control: .*lock_timeout/i);
+      expect(result.stderr).toContain("  sql: SET LOCAL lock_timeout = -1");
+      expect(result.stderr).not.toContain("  action[0]:");
+    } finally {
+      rmSync(artifactDir, { recursive: true, force: true });
+      await Promise.all([target.drop(), desired.drop()]);
+    }
+  }, 60_000);
 });
 
 describe("CLI: --help", () => {
@@ -1799,6 +1848,102 @@ describe("CLI: secret redaction surface", () => {
       await Promise.all([shadow.drop(), target.drop()]);
     }
   }, 120_000);
+
+  test("schema apply warns before verbose output exposes manifest-unredacted secrets", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_verbose_secret_shadow");
+    const target = await cluster.createDb("cli_verbose_secret_tgt");
+    const secret = "verbose-secret-xyz";
+    try {
+      const dir = join(tmpdir(), `pg-delta-next-verbose-secret-${Date.now()}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "01_fdw.sql"),
+        `CREATE FOREIGN DATA WRAPPER cli_verbose_fdw;\n` +
+          `CREATE SERVER cli_verbose_srv FOREIGN DATA WRAPPER cli_verbose_fdw\n` +
+          `  OPTIONS (host 'h.example.com', password '${secret}');\n`,
+      );
+      writeFileSync(
+        join(dir, ".pgdelta-export.json"),
+        JSON.stringify({ formatVersion: 1, redactSecrets: false }),
+        "utf8",
+      );
+
+      // No --unsafe-show-secrets flag: the export manifest disables redaction.
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--verbose",
+      ]);
+
+      expect(res.exitCode).toBe(0);
+      const warningText =
+        "WARNING: secrets are unredacted (--unsafe-show-secrets or the export manifest) — the verbose output may contain unredacted credentials.";
+      expect(res.stderr).toContain(warningText);
+      const warningLine =
+        res.stderr.split("\n").find((line) => line.includes(warningText)) ?? "";
+      expect(warningLine).not.toContain(secret);
+      expect(res.stderr.indexOf(warningText)).toBeLessThan(
+        res.stderr.indexOf(secret),
+      );
+    } finally {
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 120_000);
+
+  test("schema apply qualifies the verbose warning for a secret-free unredacted plan", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_verbose_no_secret_shadow");
+    const target = await cluster.createDb("cli_verbose_no_secret_tgt");
+    try {
+      const dir = join(
+        tmpdir(),
+        `pg-delta-next-verbose-no-secret-${Date.now()}`,
+      );
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "01_schema.sql"),
+        `CREATE SCHEMA app;\nCREATE TABLE app.items (id integer PRIMARY KEY);\n`,
+      );
+      writeFileSync(
+        join(dir, ".pgdelta-export.json"),
+        JSON.stringify({ formatVersion: 1, redactSecrets: false }),
+        "utf8",
+      );
+
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--verbose",
+      ]);
+
+      expect(res.exitCode).toBe(0);
+      expect(res.stderr).toContain(
+        "the verbose output may contain unredacted credentials.",
+      );
+      expect(res.stderr).not.toContain(
+        "the verbose output contains UNREDACTED credentials.",
+      );
+    } finally {
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 120_000);
 });
 
 describe("CLI: schema lint", () => {
@@ -1944,4 +2089,649 @@ describe("CLI: schema export --layout grouped", () => {
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("--format-options");
   });
+});
+
+describe("CLI: schema apply debugging", () => {
+  test("--dry-run prints the executable script to stdout and applies nothing", async () => {
+    const cluster = await sharedCluster();
+    const target = await cluster.createDb("cli_apply_dryrun_tgt");
+    try {
+      const dir = join(tmpdir(), `pg-delta-next-dryrun-${Date.now()}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "01_schema.sql"),
+        `CREATE SCHEMA app;\nCREATE TABLE app.t (id integer PRIMARY KEY);\n`,
+      );
+
+      // no --shadow: co-located shadow on the target's own cluster
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--dry-run",
+      ]);
+      expect({ code: res.exitCode, stderr: res.stderr }).toMatchObject({
+        code: 0,
+      });
+      expect(res.stdout).toStartWith(
+        "-- pg-delta schema apply --dry-run\n" +
+          "-- Execute statements one at a time, in order, on one database session.\n",
+      );
+      expect(res.stdout).toContain("CREATE TABLE");
+      expect(res.stdout).toContain('"app"."t"');
+      const beginIndex = res.stdout.indexOf("BEGIN;");
+      const searchPathIndex = res.stdout.indexOf(
+        "SET LOCAL search_path = pg_catalog;",
+      );
+      const actionIndex = res.stdout.indexOf("CREATE TABLE");
+      const commitIndex = res.stdout.indexOf("COMMIT;", actionIndex);
+      expect(beginIndex).toBeGreaterThan(-1);
+      expect(searchPathIndex).toBeGreaterThan(beginIndex);
+      expect(actionIndex).toBeGreaterThan(searchPathIndex);
+      expect(commitIndex).toBeGreaterThan(actionIndex);
+      expect(res.stderr).toMatch(
+        /Dry run: \d+ action\(s\) planned; nothing applied\./,
+      );
+      expectDryRunStdoutIsScript(res.stdout);
+
+      // the target must be UNCHANGED — nothing was applied
+      const { rows } = await target.pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'app'`,
+      );
+      expect(rows[0]?.n).toBe(0);
+    } finally {
+      await target.drop();
+    }
+  }, 90_000);
+
+  test("--dry-run stdout executes through psql with every transactionality boundary intact", async () => {
+    const cluster = await sharedCluster();
+    const target = await cluster.createDb("cli_apply_dryrun_psql_tgt");
+    const dir = mkdtempSync(join(tmpdir(), "pg-delta-next-dryrun-psql-"));
+    try {
+      await target.pool.query(`
+        CREATE SCHEMA app;
+        CREATE TYPE app.mood AS ENUM ('sad');
+        CREATE TABLE app.items (
+          id integer PRIMARY KEY,
+          mood app.mood NOT NULL DEFAULT 'sad',
+          label text NOT NULL
+        );
+        INSERT INTO app.items (id, label) VALUES (1, 'kept');
+      `);
+      writeFileSync(
+        join(dir, "01_schema.sql"),
+        `
+          CREATE SCHEMA app;
+          CREATE TYPE app.mood AS ENUM ('sad', 'ok');
+          CREATE TABLE app.items (
+            id integer PRIMARY KEY,
+            mood app.mood NOT NULL DEFAULT 'sad',
+            label text NOT NULL
+          );
+          CREATE INDEX items_label_idx ON app.items (label);
+        `,
+      );
+      const profilePath = join(dir, "concurrent-indexes.json");
+      writeFileSync(
+        profilePath,
+        JSON.stringify({
+          id: "cli-dryrun-concurrent-indexes",
+          handlers: [],
+          policy: {
+            id: "cli-dryrun-concurrent-indexes-policy",
+            serialize: [
+              {
+                match: { all: [] },
+                params: { concurrentIndexes: true },
+              },
+            ],
+          },
+        }),
+      );
+
+      const dryRun = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--target",
+        target.uri,
+        "--profile",
+        profilePath,
+        "--renames",
+        "off",
+        "--dry-run",
+      ]);
+      expect({ code: dryRun.exitCode, stderr: dryRun.stderr }).toMatchObject({
+        code: 0,
+      });
+      expectDryRunStdoutIsScript(dryRun.stdout);
+      expect(dryRun.stdout).toContain(`ALTER TYPE "app"."mood" ADD VALUE 'ok'`);
+      expect(dryRun.stdout).toContain("CREATE INDEX CONCURRENTLY");
+
+      const psql = Bun.spawn(
+        [
+          "docker",
+          "exec",
+          "-i",
+          cluster.container.getId(),
+          "psql",
+          "-X",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-U",
+          "test",
+          "-d",
+          target.name,
+          "-f",
+          "-",
+        ],
+        { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      );
+      await psql.stdin.write(dryRun.stdout);
+      await psql.stdin.end();
+      const [psqlStdout, psqlStderr, psqlExitCode] = await Promise.all([
+        new Response(psql.stdout).text(),
+        new Response(psql.stderr).text(),
+        psql.exited,
+      ]);
+      expect({ psqlExitCode, psqlStdout, psqlStderr }).toMatchObject({
+        psqlExitCode: 0,
+      });
+
+      const state = await target.pool.query<{
+        default_expression: string;
+        enum_values: string[];
+        index_valid: boolean;
+        kept_rows: number;
+      }>(`
+        SELECT
+          pg_get_expr(d.adbin, d.adrelid) AS default_expression,
+          enum_range(NULL::app.mood)::text[] AS enum_values,
+          (SELECT i.indisvalid
+             FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indexrelid
+            WHERE c.oid = 'app.items_label_idx'::regclass) AS index_valid,
+          (SELECT count(*)::int FROM app.items WHERE id = 1 AND label = 'kept') AS kept_rows
+        FROM pg_attrdef d
+        JOIN pg_attribute a
+          ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+        WHERE d.adrelid = 'app.items'::regclass AND a.attname = 'mood'
+      `);
+      expect(state.rows[0]).toMatchObject({
+        default_expression: "'sad'::app.mood",
+        enum_values: ["sad", "ok"],
+        index_valid: true,
+        kept_rows: 1,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      await target.drop();
+    }
+  }, 90_000);
+
+  test("--dry-run reports destructive actions without applying them", async () => {
+    const cluster = await sharedCluster();
+    const target = await cluster.createDb("cli_apply_dryrun_drop_tgt");
+    try {
+      await target.pool.query(
+        `CREATE SCHEMA app; CREATE TABLE app.obsolete (id integer PRIMARY KEY);`,
+      );
+      const dir = join(tmpdir(), `pg-delta-next-dryrun-drop-${Date.now()}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "01_schema.sql"), `CREATE SCHEMA app;\n`);
+      const planPath = join(dir, "plan.json");
+
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--dry-run",
+        "--out-plan",
+        planPath,
+      ]);
+
+      expect({
+        code: res.exitCode,
+        stdout: res.stdout,
+        stderr: res.stderr,
+      }).toMatchObject({ code: 0 });
+      expect(res.stdout).toContain("DROP TABLE");
+      expect(res.stdout).toContain('"app"."obsolete"');
+      expectDryRunStdoutIsScript(res.stdout);
+      const destructiveWarning = res.stderr.match(
+        /WARNING: plan contains (\d+) destructive action\(s\)\./,
+      );
+      expect(destructiveWarning).not.toBeNull();
+      const warningCount = Number(destructiveWarning?.[1]);
+      const parsed = parsePlan(readFileSync(planPath, "utf8"));
+      expect(warningCount).toBeGreaterThan(0);
+      expect(warningCount).toBe(parsed.safetyReport.destructiveActions);
+      const { rows } = await target.pool.query<{ exists: boolean }>(
+        `SELECT to_regclass('app.obsolete') IS NOT NULL AS exists`,
+      );
+      expect(rows[0]?.exists).toBe(true);
+    } finally {
+      await target.drop();
+    }
+  }, 90_000);
+
+  test("--dry-run --out-plan writes a plan artifact that parses with actions", async () => {
+    const cluster = await sharedCluster();
+    const target = await cluster.createDb("cli_apply_dryrun_outplan_tgt");
+    try {
+      const dir = join(tmpdir(), `pg-delta-next-dryrun-outplan-${Date.now()}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "01_schema.sql"),
+        `CREATE SCHEMA app;\nCREATE TABLE app.t (id integer PRIMARY KEY);\n`,
+      );
+      const planPath = join(dir, "plan.json");
+
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--dry-run",
+        "--out-plan",
+        planPath,
+      ]);
+      expect({ code: res.exitCode, stderr: res.stderr }).toMatchObject({
+        code: 0,
+      });
+      expect(res.stderr).toContain(`Plan artifact written to ${planPath}`);
+      expectDryRunStdoutIsScript(res.stdout);
+
+      const parsed = parsePlan(readFileSync(planPath, "utf8"));
+      expect(parsed.actions.length).toBeGreaterThan(0);
+      // the artifact records the redaction mode it was fingerprinted under, so
+      // a later `pgdelta apply --plan` re-extracts in the SAME mode instead of
+      // defaulting to redacted and tripping the fingerprint gate.
+      expect(parsed.redactSecrets).toBe(true);
+
+      // still nothing applied
+      const { rows } = await target.pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'app'`,
+      );
+      expect(rows[0]?.n).toBe(0);
+    } finally {
+      await target.drop();
+    }
+  }, 90_000);
+
+  test("warns before attempting to write an unredacted plan artifact", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_apply_warn_order_shadow");
+    const target = await cluster.createDb("cli_apply_warn_order_tgt");
+    const dir = mkdtempSync(join(tmpdir(), "pg-delta-next-warn-order-"));
+    const unwritablePlanPath = join(dir, "plan.json");
+    try {
+      writeFileSync(
+        join(dir, "01_schema.sql"),
+        `CREATE SCHEMA app;\nCREATE TABLE app.t (id integer PRIMARY KEY);\n`,
+      );
+      writeFileSync(
+        join(dir, ".pgdelta-export.json"),
+        JSON.stringify({ formatVersion: 1, redactSecrets: false }),
+        "utf8",
+      );
+      // A directory at the output path makes writeFileSync fail. The warning
+      // must already be on stderr before that attempted exposure can fail or
+      // partially write an artifact.
+      mkdirSync(unwritablePlanPath);
+
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--dry-run",
+        "--out-plan",
+        unwritablePlanPath,
+      ]);
+
+      expect(res.exitCode).toBe(1);
+      expect(res.stderr).toContain(
+        "the plan artifact may contain unredacted credentials.",
+      );
+      expect(res.stderr).not.toContain(
+        "the dry-run script may contain unredacted credentials.",
+      );
+      expect(res.stdout).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 90_000);
+
+  test("--verbose logs per-statement progress to stderr during a real apply", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_apply_verbose_shadow");
+    const target = await cluster.createDb("cli_apply_verbose_tgt");
+    try {
+      const dir = join(tmpdir(), `pg-delta-next-verbose-${Date.now()}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "01_schema.sql"),
+        `CREATE SCHEMA app;\nCREATE TABLE app.t (id integer PRIMARY KEY);\n`,
+      );
+
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--verbose",
+      ]);
+      expect({ code: res.exitCode, stderr: res.stderr }).toMatchObject({
+        code: 0,
+      });
+      expect(res.stderr).toContain("[1/");
+      expect(res.stderr).toContain("ok (");
+      // --verbose is a COMPLETE record of the wire, not just plan actions: the
+      // applied statements are planner-rendered atomic DDL, so the trace must
+      // also show the transaction framing actually sent (BEGIN/COMMIT) — with
+      // the documented "  ; " control prefix that keeps those lines visually
+      // distinct from `[i/total] <action sql>` lines.
+      expect(res.stderr).toContain("  ; BEGIN");
+      expect(res.stderr).toContain("  ; COMMIT");
+      expect(res.stdout).toBe("");
+
+      const { rows } = await target.pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'app'`,
+      );
+      expect(rows[0]?.n).toBe(1);
+    } finally {
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 90_000);
+
+  test("--dry-run warns about unredacted credentials when the export MANIFEST recorded the unredacted mode (no flag re-passed)", async () => {
+    // The effective redaction mode is `manifest?.redactSecrets ?? !flag`: a
+    // dir exported with --unsafe-show-secrets stamps redactSecrets:false in
+    // its manifest and is re-applied unredacted WITHOUT the operator
+    // re-passing the flag. The dry-run script (and --out-plan artifact) then
+    // carry real credentials, so the warning must key on the effective mode,
+    // not on the flag.
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("cli_apply_dryrun_unred_src");
+    const target = await cluster.createDb("cli_apply_dryrun_unred_tgt");
+    try {
+      const secret = "cli-dryrun-secret-xyz";
+      await source.pool.query(`
+        CREATE FOREIGN DATA WRAPPER cli_dryrun_fdw;
+        CREATE SERVER cli_dryrun_srv FOREIGN DATA WRAPPER cli_dryrun_fdw
+          OPTIONS (host 'h.example.com', password '${secret}');
+      `);
+      const dir = join(tmpdir(), `pg-delta-next-dryrun-unred-${Date.now()}`);
+      const exported = await runCli([
+        "schema",
+        "export",
+        "--source",
+        source.uri,
+        "--out-dir",
+        dir,
+        "--unsafe-show-secrets",
+      ]);
+      expect(exported.exitCode).toBe(0);
+
+      const planPath = join(dir, "plan.json");
+      // NOTE: no --unsafe-show-secrets here — the manifest supplies the mode.
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+        "--dry-run",
+        "--out-plan",
+        planPath,
+      ]);
+      expect({ code: res.exitCode, stderr: res.stderr }).toMatchObject({
+        code: 0,
+      });
+      // both unredacted output channels warn: the plan artifact and the script
+      const warnings = res.stderr
+        .split("\n")
+        .filter((l) => l.includes("may contain unredacted credentials"));
+      expect(warnings.length).toBe(2);
+      expectDryRunStdoutIsScript(res.stdout);
+      expect(res.stdout).toContain(secret);
+      expect(res.stdout).not.toContain("__OPTION_PASSWORD__");
+      expect(res.stderr).not.toContain(secret);
+
+      // and the artifact STAMPS the unredacted mode: its fingerprint was taken
+      // from unredacted extracts, so `pgdelta apply --plan` must re-extract
+      // unredacted too — an absent field reads as redacted and the gate would
+      // spuriously reject an unchanged target.
+      const serializedPlan = readFileSync(planPath, "utf8");
+      expect(serializedPlan).toContain(secret);
+      expect(serializedPlan).not.toContain("__OPTION_PASSWORD__");
+      const parsed = parsePlan(serializedPlan);
+      expect(parsed.redactSecrets).toBe(false);
+    } finally {
+      await Promise.all([source.drop(), target.drop()]);
+    }
+  }, 90_000);
+
+  test("warns before a manifest-unredacted failed action diagnostic without --verbose", async () => {
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("cli_apply_failure_unred_src");
+    const shadow = await cluster.createDb("cli_apply_failure_unred_shadow");
+    const target = await cluster.createDb("cli_apply_failure_unred_tgt");
+    const secret = "cli-apply-failure-secret-xyz";
+    const dir = join(tmpdir(), `pg-delta-next-failure-unred-${Date.now()}`);
+    const rejectTargetCreateServer = `
+      CREATE FUNCTION public.cli_fail_secret_ddl() RETURNS event_trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF current_database() = '${target.name}' AND TG_TAG = 'CREATE SERVER' THEN
+          RAISE EXCEPTION 'blocked secret-bearing DDL: %', current_query();
+        END IF;
+      END
+      $$;
+      CREATE EVENT TRIGGER cli_fail_secret_ddl
+        ON ddl_command_start
+        EXECUTE FUNCTION public.cli_fail_secret_ddl();
+    `;
+    try {
+      await Promise.all([
+        source.pool.query(`
+          CREATE FOREIGN DATA WRAPPER cli_failure_fdw;
+          CREATE SERVER cli_failure_srv FOREIGN DATA WRAPPER cli_failure_fdw
+            OPTIONS (host 'h.example.com', password '${secret}');
+          ${rejectTargetCreateServer}
+        `),
+        target.pool.query(`
+          CREATE FOREIGN DATA WRAPPER cli_failure_fdw;
+          ${rejectTargetCreateServer}
+        `),
+      ]);
+
+      const exported = await runCli([
+        "schema",
+        "export",
+        "--source",
+        source.uri,
+        "--out-dir",
+        dir,
+        "--unsafe-show-secrets",
+      ]);
+      expect(exported.exitCode).toBe(0);
+
+      // No --unsafe-show-secrets and no --verbose: the export manifest alone
+      // selects unredacted extraction, and only the final failure diagnostic
+      // exposes the action SQL.
+      // The desired function/trigger already exists identically on source and
+      // target. It is inert while exporting and loading the shadow, but rejects
+      // CREATE SERVER deterministically when the plan runs on this target.
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+      ]);
+
+      expect(res.exitCode).toBe(1);
+      expect(res.stdout).toBe("");
+      const warning = res.stderr
+        .split("\n")
+        .find((line) => line.includes("may contain unredacted credentials"));
+      expect(warning).toBeDefined();
+      expect(warning).not.toContain(secret);
+      const warningIndex = res.stderr.indexOf(warning!);
+      const failedSqlIndex = res.stderr.indexOf(`  sql: `);
+      const firstSecretIndex = res.stderr.indexOf(secret);
+      expect(firstSecretIndex).toBeGreaterThanOrEqual(0);
+      expect(warningIndex).toBeLessThan(firstSecretIndex);
+      expect(failedSqlIndex).toBeGreaterThan(warningIndex);
+      expect(res.stderr.indexOf(secret, firstSecretIndex + 1)).toBeGreaterThan(
+        failedSqlIndex,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      await Promise.all([source.drop(), shadow.drop(), target.drop()]);
+    }
+  }, 90_000);
+
+  test("warns before a manifest-unredacted planning failure can expose a secret", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_plan_failure_unred_shadow");
+    const target = await cluster.createDb("cli_plan_failure_unred_tgt");
+    const secret = "cli-planning-failure-secret-xyz";
+    const secretStatement =
+      `CREATE SERVER cli_planning_secret_srv ` +
+      `FOREIGN DATA WRAPPER cli_planning_secret_fdw ` +
+      `OPTIONS (password '${secret}')`;
+    const dir = mkdtempSync(
+      join(tmpdir(), "pg-delta-next-planning-failure-unred-"),
+    );
+    try {
+      // PostgreSQL itself puts the credential-bearing statement in
+      // DatabaseError.message, exercising the generic planning-error path
+      // rather than a later action report assembled by the CLI.
+      writeFileSync(
+        join(dir, "01_rejected.sql"),
+        `DO $body$\n` +
+          `BEGIN\n` +
+          `  RAISE EXCEPTION 'shadow rejected statement: ${secretStatement.replaceAll("'", "''")}';\n` +
+          `END\n` +
+          `$body$;\n`,
+      );
+      writeFileSync(
+        join(dir, ".pgdelta-export.json"),
+        JSON.stringify({ formatVersion: 1, redactSecrets: false }),
+        "utf8",
+      );
+
+      // No --unsafe-show-secrets: the manifest selects unredacted planning.
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+      ]);
+
+      expect(res.exitCode).toBe(1);
+      expect(res.stdout).toBe("");
+      const warningNeedle = "may contain unredacted credentials";
+      const warning = res.stderr
+        .split("\n")
+        .find((line) => line.includes(warningNeedle));
+      const warningIndex = res.stderr.indexOf(warningNeedle);
+      const firstSecretIndex = res.stderr.indexOf(secret);
+      expect(firstSecretIndex).toBeGreaterThanOrEqual(0);
+      expect(warningIndex).toBeGreaterThanOrEqual(0);
+      expect(warning).toBeDefined();
+      expect(warning).not.toContain(secret);
+      expect(warningIndex).toBeLessThan(firstSecretIndex);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 90_000);
+
+  test("does not warn for an early manifest-unredacted empty-shadow guard", async () => {
+    const cluster = await sharedCluster();
+    const shadow = await cluster.createDb("cli_plan_early_unred_shadow");
+    const target = await cluster.createDb("cli_plan_early_unred_tgt");
+    const dir = mkdtempSync(
+      join(tmpdir(), "pg-delta-next-planning-early-unred-"),
+    );
+    try {
+      await shadow.pool.query(`CREATE TABLE public.already_here (id integer)`);
+      writeFileSync(
+        join(dir, "01_table.sql"),
+        `CREATE TABLE public.wanted (id integer);\n`,
+      );
+      writeFileSync(
+        join(dir, ".pgdelta-export.json"),
+        JSON.stringify({ formatVersion: 1, redactSecrets: false }),
+        "utf8",
+      );
+
+      const res = await runCli([
+        "schema",
+        "apply",
+        "--dir",
+        dir,
+        "--shadow",
+        shadow.uri,
+        "--target",
+        target.uri,
+        "--renames",
+        "off",
+      ]);
+
+      expect(res.exitCode).toBe(1);
+      expect(res.stderr).toContain("shadow database is not empty");
+      expect(res.stderr).not.toContain("may contain unredacted credentials");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      await Promise.all([shadow.drop(), target.drop()]);
+    }
+  }, 90_000);
 });

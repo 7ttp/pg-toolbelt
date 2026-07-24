@@ -10,7 +10,7 @@
  *      risk is observed on the clone, not certified by the rule)
  */
 import type { Pool } from "pg";
-import { apply } from "../apply/apply.ts";
+import { apply, type ApplyError } from "../apply/apply.ts";
 import { diff, type Delta } from "../core/diff.ts";
 import type { FactBase } from "../core/fact.ts";
 import type { StableId } from "../core/stable-id.ts";
@@ -93,7 +93,7 @@ export interface ProofVerdict {
   /** Why opt-in strict projection-audit enforcement failed. Absent when strict
    * audit was not requested or its requirements passed. */
   strictAuditFailure?: "unavailable" | "suspicious";
-  applyError?: { actionIndex: number; sql: string; message: string };
+  applyError?: ApplyError;
   /** Clone state did not match the state the plan was produced from. The proof
    *  refuses before auto-seeding or applying any action. */
   sourceStateViolation?: {
