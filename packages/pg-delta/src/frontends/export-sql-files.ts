@@ -14,6 +14,7 @@
  *   converges with zero deferred rounds (the stage-9 zero-round gate).
  */
 import { buildFactBase, type FactBase } from "../core/fact.ts";
+import { hashString } from "../core/hash.ts";
 import { encodeId, type StableId } from "../core/stable-id.ts";
 import { plan, type Action } from "../plan/plan.ts";
 import type { IntentRuleIndex } from "../plan/rules.ts";
@@ -80,6 +81,199 @@ function renderFileSql(
     ? formatSqlStatements(bareStatements, format)
     : bareStatements;
   return `${statements.map((s) => `${s};`).join("\n\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Portable path tree
+// ---------------------------------------------------------------------------
+
+/** Length of the stable SHA-256 prefix used to disambiguate case twins. */
+const CASE_COLLISION_HASH_LENGTH = 8;
+
+interface ExportPathNode {
+  terminal: boolean;
+  children: Map<string, ExportPathNode>;
+  /** Original child segment → portable child segment. */
+  renames: Map<string, string>;
+}
+
+function exportPathNode(): ExportPathNode {
+  return {
+    terminal: false,
+    children: new Map(),
+    renames: new Map(),
+  };
+}
+
+/** Locale-independent fold for the ASCII paths emitted by {@link seg}. */
+function foldExportPath(path: string): string {
+  return path.toLowerCase();
+}
+
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Append a collision suffix without losing the semantic `.fk.sql` marker.
+ * Directory segments append directly; exported file segments keep `.sql`
+ * (and `.fk.sql`) as their extension.
+ */
+function appendCaseCollisionSuffix(
+  segment: string,
+  suffix: string,
+  isFile: boolean,
+): string {
+  if (!isFile) return `${segment}-${suffix}`;
+  const extension = segment.endsWith(".fk.sql")
+    ? ".fk.sql"
+    : segment.endsWith(".sql")
+      ? ".sql"
+      : "";
+  return extension === ""
+    ? `${segment}-${suffix}`
+    : `${segment.slice(0, -extension.length)}-${suffix}${extension}`;
+}
+
+/**
+ * Make every segment in an export path tree safe for case-insensitive
+ * filesystems.
+ *
+ * PostgreSQL identifiers are case-sensitive, while default APFS and NTFS are
+ * not. Checking only complete file names is insufficient: `schemas/App` and
+ * `schemas/app` are also the same physical directory, which makes manifest
+ * ownership drift on the next export even when their leaf files differ.
+ *
+ * Each set of sibling segments that collides after case-folding is renamed
+ * symmetrically. The suffix is the first eight hex characters of SHA-256 over
+ * that segment's original case-sensitive path prefix. This keeps names stable
+ * across exports and independent of input order. A deterministic numeric
+ * fallback handles a real object that already owns the hash-shaped candidate
+ * (and even a hash-prefix collision) without ever renaming the unrelated
+ * object.
+ */
+function makeExportPathsPortable(files: SqlFile[]): SqlFile[] {
+  const root = exportPathNode();
+
+  for (const file of files) {
+    const segments = file.name.split("/");
+    if (segments.length === 0 || segments.some((segment) => segment === "")) {
+      throw new Error(`schema export produced an invalid path: ${file.name}`);
+    }
+
+    let node = root;
+    for (const segment of segments) {
+      if (node.terminal) {
+        throw new Error(
+          `schema export path is both a file and a directory: ${file.name}`,
+        );
+      }
+      let child = node.children.get(segment);
+      if (child === undefined) {
+        child = exportPathNode();
+        node.children.set(segment, child);
+      }
+      node = child;
+    }
+    if (node.terminal) {
+      throw new Error(`schema export produced a duplicate path: ${file.name}`);
+    }
+    if (node.children.size > 0) {
+      throw new Error(
+        `schema export path is both a file and a directory: ${file.name}`,
+      );
+    }
+    node.terminal = true;
+  }
+
+  let renamed = false;
+  const assignPortableSegments = (
+    node: ExportPathNode,
+    originalPrefix: readonly string[],
+  ): void => {
+    const byFolded = new Map<string, string[]>();
+    for (const segment of node.children.keys()) {
+      const folded = foldExportPath(segment);
+      const bucket = byFolded.get(folded);
+      if (bucket === undefined) {
+        byFolded.set(folded, [segment]);
+      } else {
+        bucket.push(segment);
+      }
+    }
+
+    const colliding = new Set<string>();
+    for (const bucket of byFolded.values()) {
+      if (bucket.length > 1) {
+        for (const segment of bucket) colliding.add(segment);
+      }
+    }
+
+    const occupied = new Set(
+      [...node.children.keys()]
+        .filter((segment) => !colliding.has(segment))
+        .map(foldExportPath),
+    );
+    for (const segment of [...colliding].sort(compareCodePoints)) {
+      const child = node.children.get(segment)!;
+      const originalPath = [...originalPrefix, segment].join("/");
+      const shortHash = hashString(originalPath).slice(
+        0,
+        CASE_COLLISION_HASH_LENGTH,
+      );
+
+      let attempt = 0;
+      let candidate: string;
+      do {
+        const suffix = attempt === 0 ? shortHash : `${shortHash}-${attempt}`;
+        candidate = appendCaseCollisionSuffix(segment, suffix, child.terminal);
+        attempt++;
+      } while (occupied.has(foldExportPath(candidate)));
+
+      node.renames.set(segment, candidate);
+      occupied.add(foldExportPath(candidate));
+      renamed = true;
+    }
+
+    for (const [segment, child] of node.children) {
+      assignPortableSegments(child, [...originalPrefix, segment]);
+    }
+  };
+  assignPortableSegments(root, []);
+
+  if (!renamed) return files;
+
+  const portable = files.map((file) => {
+    const originalSegments = file.name.split("/");
+    const portableSegments: string[] = [];
+    let node = root;
+    for (const segment of originalSegments) {
+      portableSegments.push(node.renames.get(segment) ?? segment);
+      node = node.children.get(segment)!;
+    }
+    return { ...file, name: portableSegments.join("/") };
+  });
+
+  // Fail closed if a future path-mapping change violates the invariant. Check
+  // every prefix, not only leaves, because directory aliases are destructive
+  // to manifest ownership on case-insensitive filesystems.
+  if (new Set(portable.map((file) => file.name)).size !== portable.length) {
+    throw new Error("schema export could not produce unique file paths");
+  }
+  const prefixes = new Set<string>();
+  for (const file of portable) {
+    const segments = file.name.split("/");
+    for (let index = 1; index <= segments.length; index++) {
+      prefixes.add(segments.slice(0, index).join("/"));
+    }
+  }
+  if (new Set([...prefixes].map(foldExportPath)).size !== prefixes.size) {
+    throw new Error(
+      "schema export could not produce case-insensitively unique paths",
+    );
+  }
+
+  return portable;
 }
 
 /** The subject deciding an action's file: produced fact, else consumed. */
@@ -676,7 +870,9 @@ export function exportSqlFiles(
   };
 
   if (layout === "grouped") {
-    return exportGrouped(rendered.actions, fb, options, pathContext);
+    return makeExportPathsPortable(
+      exportGrouped(rendered.actions, fb, options, pathContext),
+    );
   }
 
   // group statements by file, preserving plan order within AND across
@@ -713,21 +909,25 @@ export function exportSqlFiles(
         runs.push({ path, statements: [action.sql] });
       }
     });
-    return runs.map((run, index) => ({
-      name: `${String(index).padStart(4, "0")}_${run.path.replaceAll("/", "_")}`,
-      sql: renderFileSql(run.statements, options.format),
-    }));
+    return makeExportPathsPortable(
+      runs.map((run, index) => ({
+        name: `${String(index).padStart(4, "0")}_${run.path.replaceAll("/", "_")}`,
+        sql: renderFileSql(run.statements, options.format),
+      })),
+    );
   }
 
   const ordered = [...files.entries()].sort(
     (a, b) => a[1].firstAt - b[1].firstAt,
   );
-  return ordered.map(([path, entry]) => ({
-    name: path,
-    sql:
-      (path.endsWith(".fk.sql") ? FK_SPLIT_HEADER : "") +
-      renderFileSql(entry.statements, options.format),
-  }));
+  return makeExportPathsPortable(
+    ordered.map(([path, entry]) => ({
+      name: path,
+      sql:
+        (path.endsWith(".fk.sql") ? FK_SPLIT_HEADER : "") +
+        renderFileSql(entry.statements, options.format),
+    })),
+  );
 }
 
 interface CompiledPattern {
