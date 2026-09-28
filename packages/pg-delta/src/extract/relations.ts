@@ -6,6 +6,7 @@ import {
   aclJson,
   aclJsonMemberAware,
   type CatalogFamily,
+  deparsedDef,
   memberExtensionExpr,
   notExtensionMember,
   parseAcl,
@@ -323,7 +324,7 @@ export const tableConstraintsFamily: CatalogFamily = {
           },
           parent: relation,
           payload: {
-            def: String(row["def"]),
+            def: deparsedDef(row, "constraint"),
             type: String(row["type"]),
             validated: Boolean(row["validated"]),
           },
@@ -403,7 +404,7 @@ export const indexesFamily: CatalogFamily = {
           // `attachedTo`. Unmasking it would `valid: "replace"` the parent and
           // CASCADE-drop attached children that this plan does not recreate.
           payload: {
-            def: String(row["def"]),
+            def: deparsedDef(row, "index"),
             valid: Boolean(row["valid"]),
             attachedTo,
           },
@@ -533,7 +534,10 @@ export const viewsFamily: CatalogFamily = {
         {
           id,
           parent: schemaId(row["schema"]),
-          payload: { def: String(row["def"]), reloptions: reloptions(row) },
+          payload: {
+            def: deparsedDef(row, "view"),
+            reloptions: reloptions(row),
+          },
         },
         row,
         parseAcl(row["acl"]),
@@ -600,7 +604,7 @@ export const triggersFamily: CatalogFamily = {
             name: String(row["table"]),
           },
           payload: {
-            def: String(row["def"]),
+            def: deparsedDef(row, "trigger"),
             enabled: String(row["enabled"]),
           },
         },
@@ -648,7 +652,10 @@ export const rulesFamily: CatalogFamily = {
             schema: String(row["schema"]),
             name: String(row["table"]),
           },
-          payload: { def: String(row["def"]), enabled: String(row["enabled"]) },
+          payload: {
+            def: deparsedDef(row, "rule"),
+            enabled: String(row["enabled"]),
+          },
         },
         row,
       );
