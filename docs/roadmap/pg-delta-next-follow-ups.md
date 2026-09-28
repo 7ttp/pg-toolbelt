@@ -1787,6 +1787,47 @@ Deferred from the same review (not blocking):
   Supabase auto-expose injectee. Keep the revoke for overlay matches only if
   we start modeling grant options on the tuples.
 
+
+## PR #484 review triage (Codex) — domain NOT NULL on PG 17+
+
+PostgreSQL 17+ catalogs a domain NOT NULL as a `pg_constraint` row
+(`contype = 'n'`). Both extractors (`types.ts` constraint facts,
+`dependencies.ts` `dcon` CTE) skip those rows so NOT NULL is modeled only by
+the domain's `notNull` attribute and hashes match across PG 14–18 (#482).
+
+Deferred from the review (not blocking):
+
+- **Comment on a domain NOT NULL constraint.** `COMMENT ON CONSTRAINT
+  <domain>_not_null ON DOMAIN d` (PG 17+ only) lives on the skipped row, so
+  it is neither diffed nor exported and a load of the export converges to
+  the comment-less state. This is a narrow PG 17+ regression for a NOT NULL
+  domain that exists on both sides: a comment-only change on that row used
+  to plan `COMMENT ON CONSTRAINT …` and now plans nothing. (Creating such a
+  domain from a PG 17+ source failed outright before #484, so the create
+  path only narrowed.) The loss is not silent: extract emits an info
+  `domain_not_null_comment_skipped` diagnostic for a commented `n` row. The
+  constraint's name is not modeled either (deliberate: PG 14–16 cannot
+  replay `ADD CONSTRAINT name NOT NULL`), so a faithful comment would need a
+  `notNullComment` domain attribute rendered against the auto-generated name
+  on PG 17+ only. Pick up if a user reports it.
+- **PG 18 `NOT ENFORCED` on domain NOT NULL.** Not reachable: PG 18 rejects
+  `specifying constraint enforceability not supported for domains` for every
+  domain constraint form, and `NOT NULL constraints cannot be marked NOT
+  ENFORCED` on `ALTER DOMAIN … ADD CONSTRAINT`. Every domain `n` row has
+  `conenforced = true` and mirrors `typnotnull`.
+- **Legacy snapshots carrying the `n` constraint fact (round 2).** A
+  snapshot captured by an earlier alpha from a PG 17+ database with a
+  NOT NULL domain serialized `constraint:<schema>.<domain>.<domain>_not_null`
+  (`type: "n"`). Diffed against a fresh extraction it reads as a removed
+  constraint: `drift` reports it, and a plan from that snapshot emits
+  `ALTER DOMAIN … DROP CONSTRAINT <domain>_not_null`, which on PG 17+ makes
+  the domain nullable. Recapture the snapshot. Snapshot compatibility across
+  extractor changes is not a contract today — `FORMAT_VERSION` has stayed at 1
+  through every extraction change since the rewrite, and legacy stamps are
+  tolerated rather than rejected (`cli/profile.ts`). The durable fix is
+  general: an extractor-version stamp on snapshots that `drift`/`plan` check
+  and refuse with recapture guidance, not a per-kind normalizer for this row.
+
 ## Issue #487 follow-up — enum retype through an indirect enum source
 
 Retyping a column away from an enum now casts through `text` / `text[]`,
