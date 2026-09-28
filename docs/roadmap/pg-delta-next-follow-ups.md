@@ -1870,3 +1870,61 @@ Deferred:
   `pg_init_privs.objsubid = 0`. Tables and views should be fixed together.
 - **View / matview column comments** (#332 item 4) need their own
   representation; out of scope here.
+
+## Issue #483 review triage — table NOT NULL dangling edges on PG 18
+
+PG 18 catalogs a table column's NOT NULL as a `pg_constraint` row
+(`contype = 'n'`), the same change PG 17 made for domains (#482). The fix
+excludes those rows from the `tcon` branch of the dependency resolver and
+shares one predicate with the domain-side `dcon` exclusion, so the two cannot
+drift. Diagnostics only — the edge was already dropped before reaching the fact
+base, and the `depend-edges-oracle` snapshot is unchanged across PG 14–18.
+
+Deferred from the review (not blocking, pre-existing):
+
+- **`conislocal = false` constraints dangle the same way, on every version.**
+  `relations.ts` extracts only `contype IN ('p','u','f','c','x') AND
+  conislocal`, but the resolver's `tcon` branch resolves non-local rows too, so
+  an inherited or partition-child constraint produces the identical
+  `constraint:… -[depends]-> column:…` dangling edge and warning. Confirmed on
+  postgres:17-alpine with an `INHERITS` child:
+
+  ```
+  dangling_edge: edge constraint:app.c.p_id_check -[depends]-> column:app.c.id references a fact not in the base
+  ```
+
+  The review's probe saw the same for partition-child PK/CHECK rows on PG 18.
+  Not introduced or worsened by this change, but a user with inheritance or
+  partitions still sees warning noise after it. The mechanical fix is the same
+  shape (`AND con.conislocal` in `tcon`), but whether a non-local constraint
+  should instead resolve to its PARENT constraint is a modeling decision — an
+  inherited constraint is a real dependency of the child's column, just not one
+  the engine keys separately today. Needs a deliberate call, not a one-line
+  filter. Pick up if a user reports it, or alongside any other inheritance work.
+
+Codex round 1 (PR #485), both P2, both on the `tcon` filter:
+
+- **Commented table NOT NULL rows — FIXED here.** A `COMMENT ON CONSTRAINT
+  <table>_<col>_not_null ON <table>` is accepted on PG 18, and with the row
+  skipped as a fact the comment had nowhere to live. Extraction now emits an
+  info `table_not_null_comment_skipped`, mirroring the domain side. Verified on
+  postgres:18-alpine that the comment is accepted and that an UNcommented row
+  still extracts in silence.
+- **`NOT ENFORCED` on a table NOT NULL — DECLINED, not reachable.** The finding
+  claims such a constraint leaves the column nullable while the row persists.
+  PostgreSQL 18 rejects the syntax outright:
+
+  ```
+  ERROR:  NOT NULL constraints cannot be marked NOT ENFORCED
+  ```
+
+  Every contype 'n' row observed has `conenforced = true`, so the row is always
+  equivalent to `attnotnull`. This mirrors the same conclusion already recorded
+  for domains above.
+
+  What IS reachable is `NOT VALID`: `ALTER TABLE … ADD CONSTRAINT c NOT NULL col
+  NOT VALID` succeeds on PG 18 with `convalidated = false`, while `attnotnull`
+  is still set — so pg-delta renders a plain, validating `NOT NULL`, which fails
+  at apply if the table holds NULL rows. A user-chosen name for the constraint
+  is lost the same way. That is a genuine fidelity gap, out of scope for a
+  diagnostics-only PR, and tracked separately.
