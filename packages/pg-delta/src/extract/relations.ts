@@ -264,7 +264,16 @@ const TABLE_CONSTRAINTS_SQL = `
            c.relkind AS table_kind,
            pg_get_constraintdef(con.oid) AS def,
            con.contype AS type, con.convalidated AS validated,
-           obj_description(con.oid, 'pg_constraint') AS comment
+           obj_description(con.oid, 'pg_constraint') AS comment,
+           CASE
+             WHEN con.contype NOT IN ('p', 'u') THEN NULL
+             WHEN con.conkey IS NULL OR 0 = ANY (con.conkey) THEN ARRAY[]::text[]
+             ELSE (
+               SELECT array_agg(a.attname::text ORDER BY k.ord)
+               FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+             )
+           END AS key_columns
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -291,6 +300,8 @@ export const tableConstraintsFamily: CatalogFamily = {
   apply: (ctx, rowSets) => {
     const { pushWithMeta, diagnostics } = ctx;
     for (const row of rowSets[0]!) {
+      const type = String(row["type"]);
+      const keyColumns = row["key_columns"];
       const schema = String(row["schema"]);
       const table = String(row["table"]);
       const relation: StableId = {
@@ -301,7 +312,7 @@ export const tableConstraintsFamily: CatalogFamily = {
       // Only COMMENTED contype 'n' rows reach here (see the query above): the
       // constraint itself is the column's notNull attribute, so report the
       // comment that cannot be carried and emit no fact for it.
-      if (row["type"] === "n") {
+      if (type === "n") {
         diagnostics.push({
           code: "table_not_null_comment_skipped",
           severity: "info",
@@ -325,8 +336,18 @@ export const tableConstraintsFamily: CatalogFamily = {
           parent: relation,
           payload: {
             def: deparsedDef(row, "constraint"),
-            type: String(row["type"]),
+            type,
             validated: Boolean(row["validated"]),
+            // Planner-only: CREATE TABLE drops a UNIQUE whose conkey equals
+            // another index constraint in the same statement; `_` keeps this
+            // off the hash/diff surface.
+            ...(type === "p" || type === "u"
+              ? {
+                  _keyColumns: Array.isArray(keyColumns)
+                    ? keyColumns.map(String)
+                    : [],
+                }
+              : {}),
           },
         },
         row,
