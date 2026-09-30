@@ -26,6 +26,173 @@ describe("statement coverage", () => {
     expect(orderedSql[2]).toContain("create table app.users");
   });
 
+  test("orders range type before table using it", async () => {
+    const result = await analyzeAndSort([
+      "create table app.events(id int primary key, during app.int_range not null);",
+      "create type app.int_range as range (subtype = int4, subtype_diff = app.int4_subdiff);",
+      "create function app.int4_subdiff(a int4, b int4) returns float8 language sql immutable as $$ select (a - b)::float8 $$;",
+      "create schema app;",
+    ]);
+    const validation = await validateAnalyzeResultWithPostgres(result);
+    const unknownCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNKNOWN_STATEMENT_CLASS",
+    ).length;
+    const unresolvedCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    ).length;
+    const executionErrors = validation.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "RUNTIME_EXECUTION_ERROR",
+    );
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+
+    expect(unknownCount).toBe(0);
+    expect(unresolvedCount).toBe(0);
+    expect(executionErrors).toHaveLength(0);
+    expect(orderedSql[0]).toContain("create schema app");
+    expect(orderedSql[1]).toContain("create function app.int4_subdiff");
+    expect(orderedSql[2]).toContain("create type app.int_range");
+    expect(orderedSql[3]).toContain("create table app.events");
+  }, 120000);
+
+  test("orders range constructor callers after range type", async () => {
+    const result = await analyzeAndSort([
+      "create view app.spans as select app.int_range(1, 10) as closed_open, app.int_range(1, 10, '[]') as closed;",
+      "create table app.slots(id int primary key, during app.int_range default app.int_range(0, 1));",
+      "create type app.int_range as range (subtype = int4);",
+      "create schema app;",
+    ]);
+    const validation = await validateAnalyzeResultWithPostgres(result);
+    const unresolved = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    );
+    const executionErrors = validation.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "RUNTIME_EXECUTION_ERROR",
+    );
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+    const rangeIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create type app.int_range"),
+    );
+
+    expect(unresolved).toHaveLength(0);
+    expect(executionErrors).toHaveLength(0);
+    expect(rangeIndex).toBeGreaterThan(-1);
+    expect(
+      orderedSql.findIndex((sql) => sql.includes("create view app.spans")),
+    ).toBeGreaterThan(rangeIndex);
+  }, 120000);
+
+  test("matches keyword-cast arguments against unqualified built-in parameter types", async () => {
+    const result = await analyzeAndSort([
+      "create schema app;",
+      "create table app.slots(label text default app.int_range(1::integer, 10::integer)::text, n int default app.twice(2::integer));",
+      "create type app.int_range as range (subtype = int4);",
+      "create function app.twice(a int4) returns int4 language sql immutable as $$ select a * 2 $$;",
+    ]);
+    const validation = await validateAnalyzeResultWithPostgres(result);
+    const unresolved = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    );
+    const executionErrors = validation.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "RUNTIME_EXECUTION_ERROR",
+    );
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+
+    expect(unresolved).toHaveLength(0);
+    expect(executionErrors).toHaveLength(0);
+    expect(orderedSql.at(-1)).toContain("create table app.slots");
+  }, 120000);
+
+  test("keeps quoted type names that differ from a built-in only by case", async () => {
+    const result = await analyzeAndSort([
+      `create table public.items (label text default public.label('x'::"Text"));`,
+      `create function public.label(v public."Text") returns text language sql immutable as $$ select v::text $$;`,
+      `create type public."Text" as enum ('x');`,
+    ]);
+    const validation = await validateAnalyzeResultWithPostgres(result);
+    const unresolved = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    );
+    const executionErrors = validation.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "RUNTIME_EXECUTION_ERROR",
+    );
+
+    expect(unresolved).toHaveLength(0);
+    expect(executionErrors).toHaveLength(0);
+    expect(result.ordered.at(-1)?.sql).toContain("create table public.items");
+  }, 120000);
+
+  test("orders range type after custom subtype", async () => {
+    const result = await analyzeAndSort([
+      "create type app.price_range as range (subtype = app.price);",
+      "create domain app.price as numeric check (value >= 0);",
+      "create schema app;",
+    ]);
+    const unknownCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNKNOWN_STATEMENT_CLASS",
+    ).length;
+    const unresolvedCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    ).length;
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+    const schemaIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create schema app"),
+    );
+    const subtypeIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create domain app.price"),
+    );
+    const rangeIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create type app.price_range"),
+    );
+
+    expect(unknownCount).toBe(0);
+    expect(unresolvedCount).toBe(0);
+    expect(schemaIndex).toBeGreaterThan(-1);
+    expect(subtypeIndex).toBeGreaterThan(schemaIndex);
+    expect(rangeIndex).toBeGreaterThan(subtypeIndex);
+  });
+
+  test("orders range type after canonical and subtype_diff functions", async () => {
+    const result = await analyzeAndSort([
+      "create type app.positive_int_range as range (subtype = int4, canonical = app.positive_int_range_canonical, subtype_diff = app.positive_int_range_subdiff);",
+      "create function app.positive_int_range_subdiff(a int4, b int4) returns float8 language sql immutable as 'select (a - b)::float8';",
+      "create function app.positive_int_range_canonical(value int4) returns int4 language sql immutable as 'select value';",
+      "create schema app;",
+    ]);
+    const unknownCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNKNOWN_STATEMENT_CLASS",
+    ).length;
+    const unresolvedCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    ).length;
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+    const canonicalIndex = orderedSql.findIndex((sql) =>
+      sql.includes("positive_int_range_canonical"),
+    );
+    const subtypeDiffIndex = orderedSql.findIndex((sql) =>
+      sql.includes("positive_int_range_subdiff"),
+    );
+    const rangeIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create type app.positive_int_range"),
+    );
+
+    expect(unknownCount).toBe(0);
+    expect(unresolvedCount).toBe(0);
+    expect(canonicalIndex).toBeGreaterThan(-1);
+    expect(subtypeDiffIndex).toBeGreaterThan(-1);
+    expect(rangeIndex).toBeGreaterThan(canonicalIndex);
+    expect(rangeIndex).toBeGreaterThan(subtypeDiffIndex);
+  });
+
   test("orders create role/schema before schema grant", async () => {
     const result = await analyzeAndSort([
       "grant usage on schema app to app_user;",

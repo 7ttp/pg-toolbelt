@@ -811,6 +811,82 @@ const extractCreateCollationDependencies = (
   return { provides, requires };
 };
 
+const rangeFunctionOptionNames = new Set(["canonical", "subtype_diff"]);
+
+const extractCreateRangeDependencies = (
+  statementNode: Record<string, unknown>,
+): ExtractDependenciesResult => {
+  const provides: ObjectRef[] = [];
+  const requires: ObjectRef[] = [];
+
+  const rangeRef = objectFromNameParts(
+    "type",
+    extractNameParts(statementNode.typeName),
+  );
+  if (rangeRef) {
+    provides.push(
+      createObjectRefFromAst("type", rangeRef.name, rangeRef.schema),
+    );
+    if (rangeRef.schema) {
+      requires.push(createObjectRefFromAst("schema", rangeRef.schema));
+    }
+  }
+
+  const params = Array.isArray(statementNode.params)
+    ? statementNode.params
+    : [];
+  let subtypeSignature = "unknown";
+  for (const paramNode of params) {
+    const defElem = asRecord(asRecord(paramNode)?.DefElem);
+    if (!defElem || typeof defElem.defname !== "string") {
+      continue;
+    }
+    const optionName = defElem.defname.toLowerCase();
+    const typeName = asRecord(asRecord(defElem.arg)?.TypeName);
+
+    if (optionName === "subtype") {
+      const typeRef = typeFromTypeNameNode(typeName);
+      if (typeRef) {
+        requires.push(typeRef);
+        subtypeSignature = typeRef.schema
+          ? `${typeRef.schema}.${typeRef.name}`
+          : typeRef.name;
+      }
+      continue;
+    }
+
+    if (rangeFunctionOptionNames.has(optionName)) {
+      const functionRef = objectFromNameParts(
+        "function",
+        extractNameParts(typeName?.names),
+      );
+      if (functionRef) {
+        requires.push(functionRef);
+      }
+    }
+  }
+
+  // PostgreSQL also creates range(lower, upper) and range(lower, upper, bounds)
+  // constructor functions named after the range type.
+  if (rangeRef) {
+    for (const signature of [
+      `(${subtypeSignature},${subtypeSignature})`,
+      `(${subtypeSignature},${subtypeSignature},text)`,
+    ]) {
+      provides.push(
+        createObjectRefFromAst(
+          "function",
+          rangeRef.name,
+          rangeRef.schema,
+          signature,
+        ),
+      );
+    }
+  }
+
+  return { provides, requires };
+};
+
 const aggregateFunctionOptionNames = new Set([
   "sfunc",
   "finalfunc",
@@ -1127,6 +1203,10 @@ const extractDependencyRefs = (
         asRecord(astNode.CreateForeignServerStmt) ?? {},
       );
     case "CREATE_TYPE": {
+      const rangeStmt = asRecord(astNode.CreateRangeStmt);
+      if (rangeStmt) {
+        return extractCreateRangeDependencies(rangeStmt);
+      }
       const compositeType = asRecord(astNode.CompositeTypeStmt);
       const compositeRef = relationFromRangeVarNode(
         compositeType?.typevar,

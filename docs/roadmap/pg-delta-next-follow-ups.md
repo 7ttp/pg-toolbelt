@@ -2053,3 +2053,34 @@ tables. Deferred:
   (`src/plan/rules/publications.ts`), so a partition drop + recreate can
   lose its publication membership. Needs a corpus case and a publication
   membership re-add on table replace.
+
+## PR #500 review triage (Codex) — pg-topo range types
+
+#500 replaces #288, which grew to ~15k lines by encoding PostgreSQL catalog
+knowledge (built-in opclasses, support routines, callback signatures) into
+pg-topo. pg-topo stays a best-effort, catalog-independent sorter; the items
+below are recorded instead of fixed. None of them was handled on `main`
+before #500 either (the whole statement was `UNKNOWN`).
+
+- **Unqualified built-in support functions.** `subtype_diff = float8mi`
+  reports `UNRESOLVED_DEPENDENCY` for `function:public:float8mi`, because
+  unqualified function refs default to `public` and `isBuiltInObjectRef`
+  only recognizes `pg_catalog`-qualified functions. Aggregates have the same
+  gap (`sfunc = int4pl`). It is a warning only; ordering is unaffected, and
+  writing `pg_catalog.float8mi` silences it. A real fix needs either a
+  built-in function list or a general "unqualified, no local producer → no
+  diagnostic" rule for support-function options, shared with aggregates.
+- **Overloaded `subtype_diff` / `canonical` names.** The requirement carries
+  no signature, so it matches every overload. An overload that itself takes
+  the range type (`app.diff(app.r, app.r)` next to `app.diff(int4, int4)`)
+  forms a false cycle. Attaching `(subtype, subtype)` to `subtype_diff` fixes
+  it if a real schema hits it.
+- **Shell types.** `create type app.r;` (`DefineStmt` without a definition)
+  is still unsupported, so a range whose C `canonical` function takes the
+  shell type reports `CYCLE_DETECTED`.
+- **Implicit multirange types.** The range does not provide its multirange
+  type (`<name>` with `range` → `multirange`, else `<name>_multirange`, or
+  `multirange_type_name`) or its constructors, so using it reports
+  `UNRESOLVED_DEPENDENCY`.
+- **`collation` / `subtype_opclass` options.** Not tracked as dependencies;
+  a custom collation or opclass could sort after the range.
