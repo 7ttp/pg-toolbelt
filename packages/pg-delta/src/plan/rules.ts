@@ -120,6 +120,12 @@ export type AttributeRule =
     }
   | "replace";
 
+/** What `KindRules.replaceRoot` is asked about: the fact is removed, or these
+ *  attributes change. */
+export type ReplaceRootChange =
+  | { verb: "remove" }
+  | { verb: "set"; attrs: ReadonlySet<string> };
+
 /** Read-only view over the desired state, for rules that inline children. */
 export interface FactView {
   childrenOf(id: StableId): Fact[];
@@ -203,6 +209,12 @@ export interface KindRules {
     fact: Fact,
     isRemoved: (id: StableId) => boolean,
   ) => StableId | undefined;
+  /** the ancestor to replace when PostgreSQL can't apply `change` to this fact
+   *  on its own. Consulted for every set-delta and every removal of the fact,
+   *  on both endpoints; the rule decides which changes lift. A partition key
+   *  column can't be retyped, re-collated or dropped, so the plan replaces its
+   *  partitioned table, whose subtree then recreates (or omits) the fact. */
+  replaceRoot?: (fact: Fact, change: ReplaceRootChange) => StableId | undefined;
   /** pg_default_acl objtype char for the default-privilege hygiene pass
    *  (table/view/matview/foreignTable → 'r', sequence → 'S',
    *  procedure/aggregate → 'f'); absent for kinds with no default ACLs */

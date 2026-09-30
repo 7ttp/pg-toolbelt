@@ -318,7 +318,9 @@ export function emitActions(input: ActionEmitterInput): ActionEmitterOutput {
   const recreatedByReplace = new Set<string>();
   // descendants a replaced ancestor's CREATE materialized via `alsoProduces`
   // (a partitioned parent's columns): no action of their own, but they are
-  // still created on the target and take default-privilege hygiene
+  // still created on the target and take default-privilege hygiene. The
+  // CREATE already renders their projected payload, so their attribute
+  // alters are skipped too.
   const inlinedByReplace = new Set<string>();
   for (const key of replaceIds) {
     const oldFact = source.getByEncoded(key) as Fact;
@@ -683,7 +685,13 @@ export function emitActions(input: ActionEmitterInput): ActionEmitterOutput {
 
   // in-place alters (skipped for facts a replace already recreated)
   for (const [key, sets] of setsByFact) {
-    if (replaceIds.has(key) || recreatedByReplace.has(key)) continue;
+    if (
+      replaceIds.has(key) ||
+      recreatedByReplace.has(key) ||
+      inlinedByReplace.has(key)
+    ) {
+      continue;
+    }
     // alters also render against the PROJECTED plan target: an alter that inlines
     // a child reference (ALTER COLUMN … TYPE … re-applying the desired DEFAULT,
     // REPLICA IDENTITY USING a desired index) must not surface a filtered-out
