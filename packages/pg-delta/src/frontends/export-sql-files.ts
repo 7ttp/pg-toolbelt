@@ -1253,7 +1253,14 @@ function exportGrouped(
 
   interface GroupedFile {
     category: Category;
-    items: { sql: string; verbRank: number; scopeRank: number; at: number }[];
+    items: {
+      sql: string;
+      verbRank: number;
+      scopeRank: number;
+      at: number;
+      action: Action;
+      relation: string;
+    }[];
   }
   // Case-twin paths fold to one shared file, exactly like the by-object
   // layout (issue #365) — regrouping cannot re-split them because the fold is
@@ -1302,6 +1309,9 @@ function exportGrouped(
       verbRank: VERB_PRIORITY[action.verb] ?? 99,
       scopeRank: subject === undefined ? 0 : scopeRank(subject),
       at,
+      action,
+      relation:
+        subject === undefined ? "" : JSON.stringify(schemaAndName(subject)),
     });
     files.set(path, entry);
   });
@@ -1314,7 +1324,26 @@ function exportGrouped(
   });
 
   return orderedPaths.map(([path, entry]) => {
-    // within-file order: create→alter, then object→comment→…, stable by position
+    // REVOKE ALL clears the grantee's column ACLs: keep it ahead of its relation's regrants
+    const floors = new Map<string, { verbRank: number; scopeRank: number }>();
+    for (const item of entry.items.toReversed()) {
+      const floor = floors.get(item.relation) ?? {
+        verbRank: Infinity,
+        scopeRank: Infinity,
+      };
+      if (
+        item.action.destroys.length > 0 &&
+        (floor.verbRank - item.verbRank || floor.scopeRank - item.scopeRank) < 0
+      ) {
+        item.verbRank = floor.verbRank;
+        item.scopeRank = floor.scopeRank;
+      }
+      if (
+        (item.verbRank - floor.verbRank || item.scopeRank - floor.scopeRank) < 0
+      )
+        floors.set(item.relation, item);
+    }
+    // within-file order: create→alter, then object→comment→…, stable by position (after the floor)
     const statements = [...entry.items]
       .sort(
         (a, b) =>
