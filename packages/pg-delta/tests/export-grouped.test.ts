@@ -204,6 +204,7 @@ describe("export: grouped layout (v1 parity)", () => {
     }
   }, 120_000);
 
+  // "select" ranks the column GRANT as an object statement and "all" as an acl, so keep both
   test.each(["all", "select"])(
     "keeps a column grant the %s default-privilege revoke would wipe",
     async (priv) => {
@@ -243,9 +244,6 @@ describe("export: grouped layout (v1 parity)", () => {
         }
         expect(loaded.factBase.rootHash).toBe(fb.rootHash);
       } finally {
-        await cluster.adminPool
-          .query(`DROP OWNED BY ${role} CASCADE`)
-          .catch(() => {});
         await Promise.all([src.drop(), shadow.drop()]);
         await cluster.adminPool
           .query(`DROP ROLE IF EXISTS ${role}`)

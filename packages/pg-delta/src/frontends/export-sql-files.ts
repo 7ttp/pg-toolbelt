@@ -1259,7 +1259,7 @@ function exportGrouped(
       scopeRank: number;
       at: number;
       action: Action;
-      relation: string;
+      objectKey: string;
     }[];
   }
   // Case-twin paths fold to one shared file, exactly like the by-object
@@ -1310,7 +1310,7 @@ function exportGrouped(
       scopeRank: subject === undefined ? 0 : scopeRank(subject),
       at,
       action,
-      relation:
+      objectKey:
         subject === undefined ? "" : JSON.stringify(schemaAndName(subject)),
     });
     files.set(path, entry);
@@ -1324,10 +1324,13 @@ function exportGrouped(
   });
 
   return orderedPaths.map(([path, entry]) => {
-    // REVOKE ALL clears the grantee's column ACLs: keep it ahead of its relation's regrants
+    // A destroying statement must stay ahead of every later statement on the same
+    // object: a table REVOKE ALL also wipes the grantee's column grants, and the
+    // regrant's rank depends on its subject, so lower the destroy to the lowest rank
+    // that follows it in plan order.
     const floors = new Map<string, { verbRank: number; scopeRank: number }>();
     for (const item of entry.items.toReversed()) {
-      const floor = floors.get(item.relation) ?? {
+      const floor = floors.get(item.objectKey) ?? {
         verbRank: Infinity,
         scopeRank: Infinity,
       };
@@ -1341,9 +1344,9 @@ function exportGrouped(
       if (
         (item.verbRank - floor.verbRank || item.scopeRank - floor.scopeRank) < 0
       )
-        floors.set(item.relation, item);
+        floors.set(item.objectKey, item);
     }
-    // within-file order: create→alter, then object→comment→…, stable by position (after the floor)
+    // within-file order: create→alter, then object→comment→…, stable by position
     const statements = [...entry.items]
       .sort(
         (a, b) =>
