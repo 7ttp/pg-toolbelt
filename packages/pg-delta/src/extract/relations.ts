@@ -654,7 +654,8 @@ export const viewsFamily: CatalogFamily = {
 const TRIGGERS_SQL = `
     SELECT n.nspname AS schema, c.relname AS table, t.tgname AS name,
            c.relkind AS table_kind,
-           pg_get_triggerdef(t.oid) AS def,
+           -- pretty: nested and flat OR chains print alike, so a replayed WHEN converges
+           pg_get_triggerdef(t.oid, true) AS def,
            t.tgenabled AS enabled,
            obj_description(t.oid, 'pg_trigger') AS comment
     FROM pg_trigger t
