@@ -8,12 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
 import { apply } from "../src/apply/apply.ts";
+import { extract } from "../src/extract/extract.ts";
 import {
   buildSchemaExport,
   planSchemaFiles,
   provisionCoLocatedShadow,
   readExportManifest,
   renderPlanFiles,
+  saveSnapshot,
   ShadowProvisionError,
   writeExportManifest,
   type ManagementScope,
@@ -498,8 +500,56 @@ describe("public schema frontends", () => {
       expect(files.map((f) => f.sql).join("\n")).not.toContain(
         `REVOKE ALL ON SCHEMA "public" FROM PUBLIC`,
       );
+      /* revoking the grant does not bring it under management */
+      await source.pool.query(`REVOKE ALL ON SCHEMA public FROM PUBLIC`);
+      const revoked = await buildSchemaExport(source.pool, { profile });
+      expect(revoked.files.map((f) => f.sql).join("\n")).not.toContain(
+        `REVOKE ALL ON SCHEMA "public" FROM PUBLIC`,
+      );
     } finally {
       await source.drop();
+    }
+  }, 120_000);
+
+  test("a policy baseline keeps the public revoke through export, load and sync", async () => {
+    const profile: IntegrationProfile = {
+      id: "test-baseline-public",
+      handlers: [],
+      policy: { id: "test-baseline-public", baseline: "fresh" },
+    };
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("frontend_baseline_public");
+    const shadow = await cluster.createDb("frontend_baseline_public_shadow");
+    const baselineDir = mkdtempSync(join(tmpdir(), "pgdn-fe-baseline-"));
+    try {
+      /* the baseline is a fresh database, so it holds PUBLIC's grant on public */
+      const { factBase, pgVersion } = await extract(source.pool);
+      saveSnapshot(factBase, pgVersion, join(baselineDir, "fresh.json"));
+      await source.pool.query(`REVOKE ALL ON SCHEMA public FROM PUBLIC`);
+
+      const exported = await buildSchemaExport(source.pool, {
+        profile,
+        resolveOptions: { baselineDir },
+      });
+      expect(exported.files.map((f) => f.sql).join("\n"))
+        .toMatchInlineSnapshot(`
+        "REVOKE ALL ON SCHEMA "public" FROM PUBLIC;
+        "
+      `);
+      const planned = await planSchemaFiles(
+        source.pool,
+        shadow.pool,
+        exported.files,
+        {
+          profile,
+          manifest: exported.manifest,
+          resolveOptions: { baselineDir },
+        },
+      );
+      expect(planned.plan.actions.map((a) => a.sql)).toEqual([]);
+    } finally {
+      rmSync(baselineDir, { recursive: true, force: true });
+      await Promise.all([source.drop(), shadow.drop()]);
     }
   }, 120_000);
 
