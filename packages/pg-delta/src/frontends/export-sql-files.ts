@@ -978,10 +978,9 @@ export function exportSqlFiles(
   //     public could never replay). Its comment and its live grants are
   //     deliberately NOT seeded: they diff like every other schema's, so a
   //     customized public (REVOKE CREATE FROM PUBLIC, a changed COMMENT) is
-  //     exported rather than masked by a same-valued baseline (review:
-  //     public-schema ACL/comment preservation). A grant a fresh public carries
-  //     (to PUBLIC, or to an overlay grantee such as anon) that live revoked IS
-  //     seeded, or it never diffs and its REVOKE is lost.
+  //     exported rather than masked by a same-valued baseline. A grant a fresh
+  //     public carries (to PUBLIC, or to an overlay grantee such as anon) that
+  //     live revoked IS seeded, or it never diffs and its REVOKE is lost.
   //   - reference-only facts are assumed-present platform objects (e.g.
   //     auth.users under --profile supabase). diff/plan don't consult
   //     `referenceOnly` — the DB-to-DB path relies on both sides carrying them —

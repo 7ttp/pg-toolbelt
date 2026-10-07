@@ -3,9 +3,9 @@
  * REVOKE CREATE ON SCHEMA public FROM PUBLIC, or a changed COMMENT) must be
  * EXPORTED. The export baseline seeds `public`'s existence — not its live
  * acl/comment — so these facts diff against a pristine baseline like every other
- * schema and are emitted, instead of being masked by a same-valued baseline
- * (PR #307 review: public-schema ACL/comment preservation). A grant a fresh
- * public carries that live revoked is seeded, so it diffs into a REVOKE.
+ * schema and are emitted, instead of being masked by a same-valued baseline.
+ * A grant a fresh public carries that live revoked is seeded, so it diffs into
+ * a REVOKE.
  * Pure — no DB.
  */
 import { describe, expect, test } from "bun:test";
