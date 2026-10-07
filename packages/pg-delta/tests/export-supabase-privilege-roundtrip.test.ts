@@ -32,7 +32,7 @@ import { applySupabaseBaseInit } from "./supabase-base-init.ts";
 
 const dbs: TestDb[] = [];
 const extraPools: pg.Pool[] = [];
-const extraClusters: Cluster[] = [];
+const extraClusters: Pick<Cluster, "stop">[] = [];
 afterAll(async () => {
   await Promise.all(extraPools.map((p) => p.end().catch(() => {})));
   await Promise.all(dbs.map((d) => d.drop().catch(() => {})));
@@ -415,65 +415,57 @@ describe.skipIf(!runSupabaseBareTests)(
     }, 180_000);
 
     test("declarative sync keeps public revoked from PUBLIC and anon", async () => {
-      const [target, shadow] = await Promise.all([
-        startStandaloneSupabase(),
-        startStandaloneSupabase(),
-      ]);
-      try {
-        await Promise.all(
-          [target, shadow].map(async (stack) => {
-            const admin = new pg.Pool({
-              connectionString: stack.connectionUri(),
-            });
-            await applySupabaseBaseInit(admin).finally(() => admin.end());
-          }),
-        );
-        const targetPg = await openPostgresPool(
-          target.connectionUri(),
-          "postgres",
-        );
-        const shadowPg = await openPostgresPool(
-          shadow.connectionUri(),
-          "postgres",
-        );
-        /* the CLI drops these from its shadow: the export recreates them */
-        await shadowPg.query(`DROP EXTENSION pgcrypto, "uuid-ossp"`);
-        await targetPg.query(`
-          REVOKE ALL ON SCHEMA public FROM anon;
-          REVOKE ALL ON SCHEMA public FROM PUBLIC;
-          CREATE TABLE public.t1 (id integer);
-          REVOKE ALL ON TABLE public.t1 FROM anon;
-          CREATE FUNCTION public.f1() RETURNS integer
-            LANGUAGE sql AS $$ SELECT 1 $$;
-          REVOKE EXECUTE ON FUNCTION public.f1() FROM PUBLIC, anon;
-        `);
+      const target = await startStandaloneSupabase();
+      extraClusters.push(target);
+      const shadow = await startStandaloneSupabase();
+      extraClusters.push(shadow);
+      await Promise.all(
+        [target, shadow].map(async (stack) => {
+          const admin = new pg.Pool({
+            connectionString: stack.connectionUri(),
+          });
+          await applySupabaseBaseInit(admin).finally(() => admin.end());
+        }),
+      );
+      const targetPg = await openPostgresPool(
+        target.connectionUri(),
+        "postgres",
+      );
+      const shadowPg = await openPostgresPool(
+        shadow.connectionUri(),
+        "postgres",
+      );
+      /* the CLI drops these from its shadow: the export recreates them */
+      await shadowPg.query(`DROP EXTENSION pgcrypto, "uuid-ossp"`);
+      await targetPg.query(`
+        REVOKE ALL ON SCHEMA public FROM anon;
+        REVOKE ALL ON SCHEMA public FROM PUBLIC;
+        CREATE TABLE public.t1 (id integer);
+        REVOKE ALL ON TABLE public.t1 FROM anon;
+        CREATE FUNCTION public.f1() RETURNS integer
+          LANGUAGE sql AS $$ SELECT 1 $$;
+        REVOKE EXECUTE ON FUNCTION public.f1() FROM PUBLIC, anon;
+      `);
 
-        const exported = await buildSchemaExport(targetPg, {
+      const exported = await buildSchemaExport(targetPg, {
+        profile: supabaseProfile,
+        layout: "grouped",
+      });
+      const schemaSql = fileSql(exported.files, /public\/schema\.sql$/);
+      expect(schemaSql).toContain(`REVOKE ALL ON SCHEMA "public" FROM PUBLIC`);
+      expect(schemaSql).toContain(`REVOKE ALL ON SCHEMA "public" FROM "anon"`);
+
+      const planned = await planSchemaFiles(
+        targetPg,
+        shadowPg,
+        exported.files,
+        {
           profile: supabaseProfile,
-          layout: "grouped",
-        });
-        const schemaSql = fileSql(exported.files, /public\/schema\.sql$/);
-        expect(schemaSql).toContain(
-          `REVOKE ALL ON SCHEMA "public" FROM PUBLIC`,
-        );
-        expect(schemaSql).toContain(
-          `REVOKE ALL ON SCHEMA "public" FROM "anon"`,
-        );
-
-        const planned = await planSchemaFiles(
-          targetPg,
-          shadowPg,
-          exported.files,
-          {
-            profile: supabaseProfile,
-            manifest: exported.manifest,
-            isolatedShadow: true,
-          },
-        );
-        expect(planned.plan.actions.map((a) => a.sql)).toEqual([]);
-      } finally {
-        await Promise.all([target.stop(), shadow.stop()]);
-      }
+          manifest: exported.manifest,
+          isolatedShadow: true,
+        },
+      );
+      expect(planned.plan.actions.map((a) => a.sql)).toEqual([]);
     }, 300_000);
   },
 );

@@ -90,6 +90,10 @@ export interface ExportOptions {
    *  `assumedRoles` / `assumedSchemas` (those exempt the requirement guard).
    *  Empty for the `raw` profile. */
   assumedDefaultGrants?: AssumedDefaultGrant[];
+  /** Grantees on schema `public` in the raw source, before policy filtering or
+   *  baseline subtraction, so a filtered grant is never exported as a REVOKE.
+   *  Defaults to the grantees in `fb`. */
+  sourcePublicGrantees?: string[];
   /** Implicit owner after database-scope projection. Forwarded to `plan()` so
    *  create-time ADP hygiene still matches when owner edges were pruned. */
   defaultOwner?: string;
@@ -953,6 +957,15 @@ function pathFor(id: StableId, ctx: PathContext): string {
   return `${cluster}/misc.sql`;
 }
 
+const PUBLIC_SCHEMA: StableId = { kind: "schema", name: "public" };
+
+/** Grantees holding an acl fact on schema `public`. */
+export function publicSchemaGrantees(fb: FactBase): string[] {
+  return fb
+    .childrenOf(PUBLIC_SCHEMA)
+    .flatMap((child) => (child.id.kind === "acl" ? [child.id.grantee] : []));
+}
+
 export function exportSqlFiles(
   fb: FactBase,
   options: ExportOptions = {},
@@ -998,12 +1011,8 @@ export function exportSqlFiles(
     const key = encodeId(id);
     return fb.referenceOnly.has(key) && !members.has(key);
   });
-  const publicSchema: StableId = { kind: "schema", name: "public" };
-  const heldGrantees = new Set(
-    fb
-      .childrenOf(publicSchema)
-      .flatMap((child) => (child.id.kind === "acl" ? [child.id.grantee] : [])),
-  );
+  const managedGrantees = publicSchemaGrantees(fb);
+  const heldGrantees = new Set(options.sourcePublicGrantees ?? managedGrantees);
   const defaultGrantees = new Set([
     "PUBLIC",
     ...(options.assumedDefaultGrants ?? [])
@@ -1012,10 +1021,10 @@ export function exportSqlFiles(
   ]);
   for (const grantee of defaultGrantees) {
     /* no acl fact at all means public's ACL is filtered out, not revoked */
-    if (heldGrantees.size === 0 || heldGrantees.has(grantee)) continue;
+    if (managedGrantees.length === 0 || heldGrantees.has(grantee)) continue;
     pristine.push({
-      id: { kind: "acl", target: publicSchema, grantee },
-      parent: publicSchema,
+      id: { kind: "acl", target: PUBLIC_SCHEMA, grantee },
+      parent: PUBLIC_SCHEMA,
       payload: { privileges: ["USAGE"], grantable: [] },
     });
   }
