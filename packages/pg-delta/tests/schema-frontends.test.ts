@@ -11,6 +11,8 @@ import { apply } from "../src/apply/apply.ts";
 import { extract } from "../src/extract/extract.ts";
 import {
   buildSchemaExport,
+  exportSqlFiles,
+  loadSqlFiles,
   planSchemaFiles,
   provisionCoLocatedShadow,
   readExportManifest,
@@ -26,6 +28,7 @@ import {
   type IntegrationProfile,
 } from "../src/integrations/index.ts";
 import type { Policy } from "../src/policy/policy.ts";
+import { reconstructManagedView } from "../src/policy/reconstruct.ts";
 import { isolatedClusterPair, sharedCluster } from "./containers.ts";
 
 const SCHEMA_SQL = `
@@ -511,7 +514,40 @@ describe("public schema frontends", () => {
     }
   }, 120_000);
 
-  test("a policy baseline keeps the public revoke through export, load and sync", async () => {
+  test("exportSqlFiles preserves default public grants when all public ACLs are filtered", async () => {
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("frontend_direct_public");
+    const shadow = await cluster.createDb("frontend_direct_public_shadow");
+    try {
+      await source.pool.query(`CREATE TABLE public.items (id integer)`);
+      const { factBase } = await extract(source.pool);
+      const view = reconstructManagedView(factBase, {
+        scope: "database",
+        policy: {
+          id: "test-direct-filtered-public-acl",
+          filter: [
+            {
+              match: {
+                all: [
+                  { kind: "acl" },
+                  { target: { kind: "schema", name: "public" } },
+                ],
+              },
+              action: "exclude",
+            },
+          ],
+        },
+      });
+      const files = exportSqlFiles(view);
+      expect(files.map((f) => f.sql).join("\n")).not.toContain("REVOKE");
+      const loaded = await loadSqlFiles(files, shadow.pool);
+      expect(loaded.factBase.rootHash).toBe(factBase.rootHash);
+    } finally {
+      await Promise.all([source.drop(), shadow.drop()]);
+    }
+  }, 120_000);
+
+  test("a policy baseline keeps the public revoke in exported files", async () => {
     const profile: IntegrationProfile = {
       id: "test-baseline-public",
       handlers: [],
@@ -546,6 +582,8 @@ describe("public schema frontends", () => {
           resolveOptions: { baselineDir },
         },
       );
+      // Load/sync smoke check only: the baseline masks this grant on sync (#531).
+      // The export snapshot above is the regression assertion.
       expect(planned.plan.actions.map((a) => a.sql)).toEqual([]);
     } finally {
       rmSync(baselineDir, { recursive: true, force: true });

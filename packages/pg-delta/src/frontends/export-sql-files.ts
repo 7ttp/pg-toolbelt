@@ -92,7 +92,8 @@ export interface ExportOptions {
   assumedDefaultGrants?: AssumedDefaultGrant[];
   /** Grantees a fresh `public` grants USAGE that the source revoked and the
    *  policy manages, each exported as a REVOKE; `fb` must hold schema `public`.
-   *  Defaults to those `fb` lacks, treating `fb` as the raw source. */
+   *  Defaults to those `fb` lacks only when it holds a public ACL fact;
+   *  an empty ACL view may be policy-filtered, so it infers no revokes. */
   revokedPublicGrantees?: string[];
   /** Implicit owner after database-scope projection. Forwarded to `plan()` so
    *  create-time ADP hygiene still matches when owner edges were pruned. */
@@ -1038,8 +1039,12 @@ export function exportSqlFiles(
     const key = encodeId(id);
     return fb.referenceOnly.has(key) && !members.has(key);
   });
-  for (const grantee of options.revokedPublicGrantees ??
-    revokedPublicSchemaGrantees(fb, options.assumedDefaultGrants)) {
+  const revokedPublicGrantees =
+    options.revokedPublicGrantees ??
+    (publicSchemaGrantees(fb).length === 0
+      ? []
+      : revokedPublicSchemaGrantees(fb, options.assumedDefaultGrants));
+  for (const grantee of revokedPublicGrantees) {
     pristine.push(defaultPublicSchemaGrant(grantee));
   }
   const baseline = buildFactBase(pristine, []);
