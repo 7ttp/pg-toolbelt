@@ -11,7 +11,7 @@
 import type { FactBase } from "../../core/fact.ts";
 import type { Action, SafetyReport } from "../plan.ts";
 import { topoSort } from "../graph.ts";
-import type { StableId } from "../../core/stable-id.ts";
+import { encodeIdMemo, type StableId } from "../../core/stable-id.ts";
 import type { ApplierCapability } from "../../policy/capability.ts";
 import {
   isOverlayDefaultPrivilege,
@@ -168,6 +168,20 @@ export function finalizeActions(input: FinalizeInput): FinalizeOutput {
     // the total order stays deterministic.
     return `column\x00${c.schema}\x00${c.table}\x00${String(pos).padStart(6, "0")}`;
   };
+  // That tie-break only orders column creates that are READY together; a column
+  // gated by a dependency its siblings lack (an enum type, a user-function
+  // default) or never folded (a generated column) would otherwise run its ADD
+  // COLUMN after higher-attnum siblings and land physically last (#518).
+  chainColumnCreates(
+    actions,
+    edges,
+    desired,
+    foldHints,
+    acceptsFolds,
+    producerOf,
+    columnSubjectKey,
+    evaluatorActions,
+  );
   const order = topoSort(
     actions.length,
     edges,
@@ -260,4 +274,95 @@ export function finalizeActions(input: FinalizeInput): FinalizeOutput {
     actions: finalActions,
     safetyReport: computeSafetyReport(finalActions),
   };
+}
+
+/**
+ * Pin each table's column CREATEs to declared position (#518), mutating `edges`:
+ *  1. chain consecutive (by `_position` / attnum) column creates of the same
+ *     table, so their ADD COLUMNs run in declared order even when one of them
+ *     waits on a dependency its siblings do not have;
+ *  2. order a fold-hinted column's own dependencies (its type, its default's
+ *     function) before the CREATE TABLE it folds into, so the fold is not
+ *     vetoed by an edge crossing the merge and the column stays inline.
+ * Only for tables CREATED in the plan; an existing table's ADD COLUMNs keep
+ * dependency order. A link that would close a cycle (e.g. a generated column
+ * referencing a later column, or a dependency that itself needs the table) is
+ * skipped, and so is a hoist of a dependency whose closure runs user code at
+ * creation (an `evaluatorActions` member, e.g. a WITH DATA matview): that code
+ * can read the new table through a quoted body pg_depend cannot see.
+ */
+function chainColumnCreates(
+  actions: readonly Action[],
+  edges: Array<[number, number]>,
+  desired: FactBase,
+  foldHints: ReadonlyArray<FoldHint | undefined>,
+  acceptsFolds: readonly boolean[],
+  producerOf: ReadonlyMap<string, number>,
+  columnSubjectKey: (subject: StableId, action: Action) => string | undefined,
+  evaluatorActions: ReadonlySet<number>,
+): void {
+  const byTable = new Map<string, Array<[position: number, action: number]>>();
+  actions.forEach((action, i) => {
+    const id = action.produces[0];
+    // a positioned column create (the tie-break above uses this predicate).
+    if (id === undefined || columnSubjectKey(id, action) === undefined) return;
+    const fact = desired.get(id);
+    const pos = fact?.payload["_position"];
+    if (typeof pos !== "number" || fact?.parent === undefined) return;
+    const key = encodeIdMemo(fact.parent);
+    const list = byTable.get(key) ?? [];
+    list.push([pos, i]);
+    byTable.set(key, list);
+  });
+  if (byTable.size === 0) return;
+  const preds: number[][] = Array.from({ length: actions.length }, () => []);
+  for (const [a, b] of edges) preds[b]?.push(a);
+  // does any strict ancestor of `to` satisfy `hit`?
+  const anyAncestor = (to: number, hit: (p: number) => boolean): boolean => {
+    const seen = new Set<number>([to]);
+    const stack = [to];
+    for (let top = stack.pop(); top !== undefined; top = stack.pop()) {
+      for (const p of preds[top] ?? []) {
+        if (hit(p)) return true;
+        if (!seen.has(p)) {
+          seen.add(p);
+          stack.push(p);
+        }
+      }
+    }
+    return false;
+  };
+  const reaches = (from: number, to: number): boolean =>
+    anyAncestor(to, (p) => p === from);
+  const runsUserCode = (i: number): boolean =>
+    evaluatorActions.has(i) || anyAncestor(i, (p) => evaluatorActions.has(p));
+  const link = (before: number, after: number): void => {
+    if (before === after || reaches(after, before)) return;
+    edges.push([before, after]);
+    preds[after]?.push(before);
+  };
+  for (const [tableKey, list] of byTable) {
+    // only a table CREATED in this plan: it has no rows, so no column default is
+    // evaluated. An existing table keeps dependency order, since an ADD COLUMN
+    // default backfill can read objects pg_depend cannot see (a quoted body).
+    const table = producerOf.get(tableKey);
+    if (table === undefined || actions[table]?.verb !== "create") continue;
+    list.sort((x, y) => x[0] - y[0]);
+    // descending, so an ancestor walk never re-traverses the chain built so far.
+    for (let k = list.length - 2; k >= 0; k--) {
+      const cur = list[k];
+      const next = list[k + 1];
+      if (cur !== undefined && next !== undefined) link(cur[1], next[1]);
+    }
+    if (!acceptsFolds[table]) continue;
+    for (const [, i] of list) {
+      if (foldHints[i] === undefined) continue;
+      // `link` only appends to the table's preds, never to column `i`'s. A
+      // dependency that runs user code at creation stays after the table: the
+      // column then becomes an ADD COLUMN, still in its chained slot.
+      for (const p of preds[i] ?? []) {
+        if (!runsUserCode(p)) link(p, table);
+      }
+    }
+  }
 }
