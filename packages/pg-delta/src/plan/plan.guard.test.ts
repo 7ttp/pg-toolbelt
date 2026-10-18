@@ -51,7 +51,9 @@ const KIND_LITERAL_BASELINE: Readonly<Record<string, number>> = {
   // co-created with its column (sequence target, column parent, table owner).
   // 42 → 41: both passes share isOwnerGrant (one role-edge narrowing).
   // 41 → 40: both passes share materializedObjects (one acl exclusion).
-  "internal.ts": 40,
+  // 40 → 38: the export fold crossing veto tests `consumes` the fold target
+  // instead of matching a same-table column by kind.
+  "internal.ts": 38,
   "locks.ts": 18,
   // 10 → 11: the extension-replace satellite replay guards on
   // `oldFact.id.kind === "extension"` so a plan with no extension replace

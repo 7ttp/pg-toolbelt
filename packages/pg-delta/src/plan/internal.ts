@@ -761,27 +761,22 @@ export function compactColumnFolds(
     // the apply executor, so a crossing to another RELATION is tolerated: a
     // VALIDATED FK's referenced table (or a backing index / type on some other
     // relation) may be created by a LATER file and the loader reorders files to
-    // satisfy it. The one crossing an export constraint fold must NOT tolerate
-    // is a SAME-TABLE column of its own fold target that was deferred to a
-    // later `ADD COLUMN` (its column fold crossed a domain-type edge, or it is
-    // a generated column that never hints) — folding the constraint inline
-    // would reference a column the CREATE TABLE does not yet declare, and no
-    // file reordering can repair that. An inlined column shares the target's
-    // effective position, so it never counts as "after" and passes naturally.
+    // satisfy it. The crossing an export constraint fold must NOT tolerate is
+    // a predecessor that itself consumes the fold target: it can only run
+    // after the CREATE TABLE, so no file reordering can repair an inline
+    // reference to it. That covers a same-table column deferred to a later
+    // `ADD COLUMN` (its column fold crossed a domain-type edge, or it is a
+    // generated column that never hints) and a standalone UNIQUE INDEX backing
+    // a self-referencing FK. An inlined column shares the target's effective
+    // position, so it never counts as "after" and passes naturally.
     const lenientCrossing = isConstraintFold && foldConstraints !== undefined;
-    const foldTarget = hint.foldInto;
+    const foldTargetKey = encodeId(hint.foldInto);
     const crossesEdge = (predecessorsOf.get(origIndex) ?? []).some((p) => {
       const pPos = effectivePosOf.get(p) ?? (positionOf[p] as number);
       if (pPos <= targetPos) return false;
       if (!lenientCrossing) return true;
       const predAction = orderedActions[positionOf[p] as number] as Action;
-      return predAction.produces.some(
-        (id) =>
-          id.kind === "column" &&
-          foldTarget.kind === "table" &&
-          id.schema === foldTarget.schema &&
-          id.table === foldTarget.name,
-      );
+      return predAction.consumes.some((id) => encodeId(id) === foldTargetKey);
     });
     if (crossesEdge) continue;
     // fold: splice the clause into the CREATE's column list
