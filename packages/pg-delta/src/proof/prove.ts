@@ -355,6 +355,7 @@ async function addInheritanceDescendants(
   roots: Set<string>,
   declared: Set<string>,
 ): Promise<void> {
+  if (roots.size === 0) return;
   const { rows } = await pool.query<{
     ps: string;
     pn: string;
