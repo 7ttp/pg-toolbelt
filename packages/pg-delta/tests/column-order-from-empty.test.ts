@@ -1,7 +1,7 @@
 /**
  * Regression (#518): a table planned from an empty database, or exported and
  * reloaded, must keep its declared column order when a column is generated or
- * waits on a later dependency (a same-schema type, a function).
+ * waits on a later dependency (a same-schema type).
  *
  * Column order is invisible to the proof loop (`_position` is non-semantic, so
  * the hashes match either way), so these tests apply the plan and read the real
@@ -10,12 +10,13 @@
  * Before the fix:
  *  - a generated column never got a fold hint, so the columns after it folded
  *    into `CREATE TABLE` and the generated column was appended last;
- *  - a column waiting on a function (rule weight 8) let the ready columns after
- *    it (weight 5) sort ahead of it, even with compaction disabled.
+ *  - a column waiting on a later dependency let the ready columns after it
+ *    (weight 5) sort ahead of it, even with compaction disabled.
  *
- * A column whose DEFAULT calls a user function still lands after the columns
- * declared behind it: Postgres runs that function at ADD COLUMN time, and it may
- * read a later column that pg_depend does not record.
+ * A column that calls a user function, directly or through a column or type it
+ * reads (such as a domain CHECK), still lands after the columns declared behind
+ * it: Postgres can run that function at ADD COLUMN time, and it may read a
+ * later column that pg_depend does not record.
  *
  * Docker required.
  */
@@ -85,7 +86,7 @@ describe("column order of a table planned from empty (#518)", () => {
     expect(result.applied).toEqual(["id", "b", "a"]);
   }, 60_000);
 
-  test("a column waiting on a function keeps its declared position", async () => {
+  test("a generated column calling a function is added after the later columns", async () => {
     const result = await planFromEmpty(
       "genfn",
       `create schema app;
@@ -98,12 +99,11 @@ describe("column order of a table planned from empty (#518)", () => {
          note text
        );`,
     );
-    expect(result.applied).toEqual(result.declared);
+    expect(result.applied).toEqual(["id", "placed_on", "note", "ship_by"]);
     expect(result.tableSql).toMatchInlineSnapshot(`
       [
-        "CREATE TABLE "app"."orders" ("id" integer, "placed_on" date)",
+        "CREATE TABLE "app"."orders" ("id" integer, "placed_on" date, "note" text)",
         "ALTER TABLE "app"."orders" ADD COLUMN "ship_by" date GENERATED ALWAYS AS (app.add_week(placed_on)) STORED",
-        "ALTER TABLE "app"."orders" ADD COLUMN "note" text",
       ]
     `);
   }, 60_000);

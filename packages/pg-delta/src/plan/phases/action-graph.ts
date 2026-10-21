@@ -11,7 +11,7 @@
 import type { FactBase } from "../../core/fact.ts";
 import type { Action, SafetyReport } from "../plan.ts";
 import { topoSort } from "../graph.ts";
-import { encodeId, type StableId } from "../../core/stable-id.ts";
+import type { StableId } from "../../core/stable-id.ts";
 import type { ApplierCapability } from "../../policy/capability.ts";
 import {
   isOverlayDefaultPrivilege,
@@ -49,21 +49,20 @@ function columnCreateSlot(
  * `ADD COLUMN` always appends, so a table's new columns must be added in
  * declared order (`_position`, pg_attribute.attnum). The tie-break in
  * `actionTieKey` only orders the columns that are ready at the same time: a
- * column still waiting on a later dependency (a function its generated
- * expression calls, rule weight 8 > column 5) lets the ready columns after it
- * go first (#518). Chain each table's column creates by position so each one
- * waits for the one before it.
+ * column still waiting on a later dependency (a same-schema type, rule weight
+ * 7 > column 5) lets the ready columns after it go first (#518). Chain each
+ * table's column creates by position so each one waits for the one before it.
  *
  * Two kinds of column keep only the tie-break order, so they can land after
  * the columns declared behind them:
- *  - an evaluator column (`evaluatorActions`): its DEFAULT calls a user
- *    function, which Postgres runs at ADD COLUMN time even on an empty table.
+ *  - an evaluator column (`evaluatorActions`): it calls a user function,
+ *    directly or through a column or type it reads (such as a domain CHECK),
+ *    and Postgres can run that function at ADD COLUMN time even on an empty
+ *    table.
  *    The function may read a later column with no pg_depend edge to it (a
  *    plpgsql or quoted SQL body), so only the evaluator stratum keeps the
  *    column after it. No chain edge starts from such a column; the next column
- *    chains from the last one before it instead. A generated column on a table
- *    this plan creates is exempt: Postgres computes it per row, and the new
- *    table has none.
+ *    chains from the last one before it instead.
  *  - a column whose chain edge would close a cycle with a real dependency (a
  *    generated column reading a column declared after it). That edge is
  *    skipped.
@@ -74,7 +73,6 @@ function columnCreateSlot(
 function chainColumnCreatesByPosition(
   actions: readonly Action[],
   desired: FactBase,
-  producerOf: ReadonlyMap<string, number>,
   evaluatorActions: ReadonlySet<number>,
   edges: Array<[number, number]>,
 ): void {
@@ -117,21 +115,6 @@ function chainColumnCreatesByPosition(
     }
     return false;
   };
-  // Whether a later column may wait on this one (see the doc comment).
-  const canLead = (index: number): boolean => {
-    if (!evaluatorActions.has(index)) return true;
-    const id = (actions[index] as Action).produces[0] as StableId;
-    const fact = desired.get(id);
-    if (fact?.payload["generatedExpr"] == null || fact.parent === undefined) {
-      return false;
-    }
-    const tableProducer = producerOf.get(encodeId(fact.parent));
-    return (
-      tableProducer !== undefined &&
-      (actions[tableProducer] as Action).verb === "create"
-    );
-  };
-
   for (const columns of columnsByTable.values()) {
     columns.sort((a, b) => a.position - b.position);
     let before: number | undefined;
@@ -141,7 +124,7 @@ function chainColumnCreatesByPosition(
         edges.push([before, after]);
         addSuccessor(before, after);
       }
-      if (canLead(after)) before = after;
+      if (!evaluatorActions.has(after)) before = after;
     }
   }
 }
@@ -262,13 +245,7 @@ export function finalizeActions(input: FinalizeInput): FinalizeOutput {
     evaluatorActions,
     implicitDestroys,
   );
-  chainColumnCreatesByPosition(
-    actions,
-    desired,
-    producerOf,
-    evaluatorActions,
-    edges,
-  );
+  chainColumnCreatesByPosition(actions, desired, evaluatorActions, edges);
 
   // Order a table's ADD COLUMN creates by declared column position
   // (pg_attribute.attnum, carried as the non-semantic `_position` field) instead
@@ -355,6 +332,8 @@ export function finalizeActions(input: FinalizeInput): FinalizeOutput {
                       acceptsFolds,
                       positionOf,
                       foldConstraints,
+                      evaluatorActions,
+                      desired,
                     ),
                     source,
                   ),

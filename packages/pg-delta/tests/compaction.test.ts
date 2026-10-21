@@ -246,6 +246,39 @@ describe("compaction", () => {
     }
   }, 60_000);
 
+  test("a DEFAULT calling a kept function folds into CREATE TABLE", async () => {
+    const cluster = await sharedCluster();
+    const source = await cluster.createDb("compact_deffn_src");
+    const desired = await cluster.createDb("compact_deffn_dst");
+    const fn = `CREATE SCHEMA app;
+      CREATE FUNCTION app.one() RETURNS int LANGUAGE sql IMMUTABLE
+        AS 'select 1';`;
+    try {
+      await source.pool.query(fn);
+      await desired.pool.query(
+        `${fn} CREATE TABLE app.t (id int, x int DEFAULT app.one(), note text);`,
+      );
+      const [sourceState, desiredState] = [
+        await extract(source.pool),
+        await extract(desired.pool),
+      ];
+      const thePlan = plan(sourceState.factBase, desiredState.factBase);
+      // CREATE TABLE never runs a DEFAULT, so only a generated evaluator
+      // column is kept out of the CREATE.
+      const createTable = thePlan.actions.find(
+        (a) => a.verb === "create" && a.produces[0]?.kind === "table",
+      );
+      expect(createTable?.sql).toMatchInlineSnapshot(
+        `"CREATE TABLE "app"."t" ("id" integer, "note" text, "x" integer DEFAULT app.one())"`,
+      );
+      expect(thePlan.actions.some((a) => a.sql.includes("ADD COLUMN"))).toBe(
+        false,
+      );
+    } finally {
+      await Promise.all([source.drop(), desired.drop()]);
+    }
+  }, 60_000);
+
   test("co-create ownership fold: schema AUTHORIZATION + applier-owner ALTER elided (4→2); same proof on/off", async () => {
     const cluster = await sharedCluster();
     const cloneA = await cluster.createDb("compact_own_a");

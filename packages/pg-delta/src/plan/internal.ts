@@ -679,6 +679,8 @@ export function compactColumnFolds(
   acceptsFolds: readonly boolean[],
   positionOf: readonly number[],
   foldConstraints?: { exclude?: ReadonlySet<string> },
+  evaluatorActions?: ReadonlySet<number>,
+  desired?: FactBase,
 ): Action[] {
   const predecessorsOf = new Map<number, number[]>();
   for (const [a, b] of edges) {
@@ -715,6 +717,13 @@ export function compactColumnFolds(
     if (hint === undefined) continue;
     const action = orderedActions[pos] as Action;
     if (action.newSegmentBefore || action.transactionality !== "transactional")
+      continue;
+    // CREATE TABLE runs a generated expression (never a DEFAULT), and the user
+    // function it calls may read a column declared after it.
+    if (
+      evaluatorActions?.has(origIndex) === true &&
+      desired?.get(action.produces[0]!)?.payload["generatedExpr"] != null
+    )
       continue;
     // Constraint fold hints (CONSTRAINT name <def> clauses) apply in two modes:
     //  - `foldConstraints` (export-only, output loaded by the retry/reorder
