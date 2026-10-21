@@ -19,18 +19,21 @@
  * back, and rolls back to a savepoint, so the desired database is never modified
  * and one object failing to rebuild cannot affect another.
  *
- * Only objects the target already has are compared. A new object is created
- * from its printout, and the target holds its stable text from then on.
+ * Only objects the target already has are compared, plus the descendants of a
+ * near-miss rename's new name (see renameCounterparts). Any other new object is
+ * created from its printout, and the target holds its stable text from then on.
  */
 import type { Pool, PoolClient } from "pg";
 import { buildApplyPreamble } from "../apply/apply-preamble.ts";
 import type { Diagnostic } from "../core/diagnostic.ts";
 import { buildFactBase, type Fact, type FactBase } from "../core/fact.ts";
 import { canonicalize, type PayloadValue } from "../core/hash.ts";
-import { encodeId } from "../core/stable-id.ts";
+import { encodeId, type StableId } from "../core/stable-id.ts";
 import { readFactsScoped } from "../extract/scoped-read.ts";
 import { connectWithErrorListener } from "../pg-client.ts";
-import { plan, type Plan } from "../plan/plan.ts";
+import { plan, type Plan, type PlanOptions } from "../plan/plan.ts";
+import type { RenameCandidate } from "../plan/renames.ts";
+import { reconstructManagedView } from "../policy/reconstruct.ts";
 
 /** Payload attributes holding Postgres-deparsed SQL, by fact kind. */
 const DEPARSED_ATTRS: Readonly<Record<string, readonly string[]>> = {
@@ -92,7 +95,7 @@ function settledAttrs(before: Fact, fact: Fact): string[] {
 }
 
 /** Encoded ids a plan creates, rebuilds, or alters in place. */
-export function planSubjects(thePlan: Plan): Set<string> {
+function planSubjects(thePlan: Plan): Set<string> {
   const ids = new Set<string>();
   for (const action of thePlan.actions) {
     for (const id of action.produces) ids.add(encodeId(id));
@@ -104,6 +107,167 @@ export function planSubjects(thePlan: Plan): Set<string> {
     if (altered !== undefined) ids.add(encodeId(altered));
   }
   return ids;
+}
+
+/** A fact's kind and payload without its deparsed attributes: what must match
+ *  for two facts to differ only in spelling. */
+function structureOf(fact: Fact): string {
+  const deparsed = DEPARSED_ATTRS[fact.id.kind] ?? [];
+  const kept = Object.keys(fact.payload)
+    .filter((key) => !key.startsWith("_") && !deparsed.includes(key))
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonical(fact.payload[key])}`);
+  return `${fact.id.kind} ${kept.join(",")}`;
+}
+
+/** A fact's deparsed texts, for comparing two spellings of one structure. */
+function deparsedOf(fact: Fact): string {
+  return (DEPARSED_ATTRS[fact.id.kind] ?? [])
+    .map((attr) => canonical(fact.payload[attr]))
+    .join(",");
+}
+
+/** The StableId fields naming a table-like parent, which its rename changes. */
+const PARENT_FIELDS = new Set(["schema", "table", "target"]);
+
+/**
+ * Pair each descendant of `to` with the descendant of `from` under the paired
+ * parent that has its kind and own id fields (name, grantee, ...), or else, for
+ * one identified by a name alone (Postgres may have generated it from the
+ * table's), among those with its structure, the only one with its deparsed
+ * text, or the only one left. Undefined unless every descendant on both sides
+ * is paired: only then can settling make the subtrees match.
+ */
+function pairDescendants(
+  current: FactBase,
+  desired: FactBase,
+  to: StableId,
+  from: StableId,
+  pairs = new Map<string, Fact>(),
+): Map<string, Fact> | undefined {
+  const own = (f: Fact): Array<[string, unknown]> =>
+    Object.entries(f.id)
+      .filter(([field]) => !PARENT_FIELDS.has(field))
+      .sort(([x], [y]) => x.localeCompare(y));
+  const keyOf = (f: Fact): string => JSON.stringify(own(f));
+  // any other id field (a grantee, a provider) is part of what the fact
+  // grants or labels, so it pairs only with the same value
+  const byName = (f: Fact): boolean => "name" in f.id && own(f).length === 2;
+  const wanted = desired.childrenOf(to);
+  const olds = current.childrenOf(from);
+  const matched: Array<[Fact, Fact]> = [];
+  const taken = new Set<Fact>();
+  const match = (child: Fact, old: Fact): void => {
+    matched.push([child, old]);
+    taken.add(old);
+  };
+  const groups = new Map<string, { wanted: Fact[]; olds: Fact[] }>();
+  const groupOf = (f: Fact) => {
+    const shape = structureOf(f);
+    const group = groups.get(shape) ?? { wanted: [], olds: [] };
+    groups.set(shape, group);
+    return group;
+  };
+  for (const child of wanted) {
+    const key = keyOf(child);
+    const same = olds.find((f) => keyOf(f) === key);
+    if (same !== undefined && structureOf(same) === structureOf(child)) {
+      match(child, same);
+    } else if (byName(child)) {
+      groupOf(child).wanted.push(child);
+    }
+  }
+  for (const old of olds) {
+    if (!taken.has(old) && byName(old)) groupOf(old).olds.push(old);
+  }
+  for (const group of groups.values()) {
+    const only = (fs: Fact[], text: string): Fact | undefined => {
+      const found = fs.filter((f) => deparsedOf(f) === text);
+      return found.length === 1 ? found[0] : undefined;
+    };
+    const left = group.wanted.filter((child) => {
+      const text = deparsedOf(child);
+      const old = only(group.olds, text);
+      if (old === undefined || only(group.wanted, text) === undefined) {
+        return true;
+      }
+      match(child, old);
+      return false;
+    });
+    const leftOld = group.olds.filter((f) => !taken.has(f));
+    if (left.length === 1 && leftOld.length === 1) {
+      match(left[0]!, leftOld[0]!);
+    }
+  }
+  if (matched.length !== wanted.length || matched.length !== olds.length) {
+    return undefined;
+  }
+  for (const [child, old] of matched) {
+    pairs.set(encodeId(child.id), old);
+    if (
+      pairDescendants(current, desired, child.id, old.id, pairs) === undefined
+    ) {
+      return undefined;
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Target facts standing for the descendants of each near-miss rename's new
+ * name (same own payload, different subtree), by encoded desired id: those of
+ * the first old name, by encoded id, whose subtree pairs with its own. A
+ * descendant takes the old text only when its own replay reaches it byte for
+ * byte, otherwise its own stable text, so the choice only decides where that
+ * replay stops. The settled plan's rename matching decides (two old names it
+ * then matches stay ambiguous), and planSettled keeps every exact rename.
+ */
+function renameCounterparts(
+  current: FactBase,
+  desired: FactBase,
+  candidates: readonly RenameCandidate[],
+  options: PlanOptions,
+): Map<string, Fact> {
+  // the managed views rename discovery compares
+  const view = (fb: FactBase): FactBase =>
+    reconstructManagedView(fb, {
+      policy: options.policy,
+      capability: options.capability,
+      baseline: options.baseline,
+      scope: options.scope,
+      defaultOwner: options.defaultOwner,
+    });
+  const [managedCurrent, managedDesired] = [view(current), view(desired)];
+  // a new name an exact or ambiguous candidate claims is never paired (an
+  // old name they claim is never a near-miss)
+  const claimed = new Set(
+    candidates
+      .filter((c) => c.status !== "nearMiss")
+      .map((c) => encodeId(c.to)),
+  );
+  const fromsOf = new Map<string, { to: StableId; froms: StableId[] }>();
+  for (const c of candidates) {
+    const to = encodeId(c.to);
+    if (c.status !== "nearMiss" || claimed.has(to)) continue;
+    const entry = fromsOf.get(to) ?? { to: c.to, froms: [] };
+    entry.froms.push(c.from);
+    fromsOf.set(to, entry);
+  }
+  const counterparts = new Map<string, Fact>();
+  for (const { to, froms } of fromsOf.values()) {
+    const sorted = [...froms].sort((x, y) =>
+      encodeId(x).localeCompare(encodeId(y)),
+    );
+    for (const from of sorted) {
+      const pairs = pairDescendants(managedCurrent, managedDesired, to, from);
+      if (pairs === undefined) continue;
+      for (const [key, old] of pairs) {
+        counterparts.set(key, current.get(old.id) ?? old);
+      }
+      break;
+    }
+  }
+  return counterparts;
 }
 
 type Texts = Record<string, string>;
@@ -210,8 +374,9 @@ export interface SettleDesiredResult {
 }
 
 /**
- * Compare, for every object `current` and `desired` both have, the stable forms
- * of their deparsed attributes, and return `desired` with each compared
+ * Compare, for every object `current` and `desired` both have (or that
+ * `counterparts` pairs with a target object under another name), the stable
+ * forms of their deparsed attributes, and return `desired` with each compared
  * attribute set to the target's text (same meaning) or the desired side's
  * stable text (a real change). Reads and writes `desiredPool` inside a
  * transaction it rolls back. An object whose rebuild fails keeps its text and
@@ -224,6 +389,9 @@ export async function settleDesired(
   options: {
     /** restrict to these encoded ids, e.g. what a managed plan touches */
     only?: ReadonlySet<string>;
+    /** target facts standing for desired facts the target has under another
+     *  name, by encoded desired id (see renameCounterparts) */
+    counterparts?: ReadonlyMap<string, Fact>;
   } = {},
 ): Promise<SettleDesiredResult> {
   const candidates: Candidate[] = [];
@@ -231,7 +399,8 @@ export async function settleDesired(
     if (desired.isReferenceOnly(fact.id)) continue;
     const key = encodeId(fact.id);
     if (options.only !== undefined && !options.only.has(key)) continue;
-    const before = current.get(fact.id);
+    const own = current.get(fact.id);
+    const before = own ?? options.counterparts?.get(key);
     if (before === undefined) continue;
     const attrs = settledAttrs(before, fact);
     if (attrs.length === 0) continue;
@@ -247,7 +416,9 @@ export async function settleDesired(
       side: "desired",
       next: textsOf(fact),
       replays: 0,
-      targetComparable: sameContext(current, desired, fact, attrs),
+      // a counterpart sits under another name, so its context never matches
+      targetComparable:
+        own !== undefined && sameContext(current, desired, fact, attrs),
     });
   }
   if (candidates.length === 0) {
@@ -320,6 +491,103 @@ export async function settleDesired(
     factBase: changed ? patch(desired, values) : desired,
     changed,
     diagnostics,
+  };
+}
+
+export interface PlanSettledResult {
+  plan: Plan;
+  /** `desired` with its settled texts */
+  desired: FactBase;
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * Plan `current` -> `desired` after settling what a first plan touches,
+ * including the descendants of its near-miss renames (see renameCounterparts).
+ */
+export async function planSettled(
+  desiredPool: Pool,
+  current: FactBase,
+  desired: FactBase,
+  options: PlanOptions,
+): Promise<PlanSettledResult> {
+  // The first plan treats every owner as settable: a spelling-only difference
+  // can plan a rebuild that restores an owner the applier cannot become, and
+  // that refusal must wait until settling has removed it. The rest of the
+  // capability still projects the view.
+  const capability = options.capability;
+  const missingOwners =
+    capability === undefined || capability.isSuperuser
+      ? []
+      : [
+          ...new Set(
+            [current, desired].flatMap((fb) =>
+              fb.edges.flatMap((edge) =>
+                edge.kind === "owner" && edge.to.kind === "role"
+                  ? [edge.to.name]
+                  : [],
+              ),
+            ),
+          ),
+        ].filter((role) => !capability.memberOf.includes(role));
+  const probeOptions: PlanOptions =
+    capability === undefined || missingOwners.length === 0
+      ? options
+      : {
+          ...options,
+          capability: {
+            ...capability,
+            memberOf: [...capability.memberOf, ...missingOwners],
+          },
+        };
+  const probe = plan(current, desired, probeOptions);
+  // Only definitions this plan would emit can carry first-deparse text the
+  // target will not reproduce; a converged plan is empty and skips this.
+  const touched = planSubjects(probe);
+  const counterparts = renameCounterparts(
+    current,
+    desired,
+    probe.renameCandidates,
+    probeOptions,
+  );
+  let settle =
+    touched.size === 0
+      ? undefined
+      : await settleDesired(desiredPool, current, desired, {
+          only: touched,
+          counterparts,
+        });
+  // Settling may add a rename, never remove one: a new name settled equal to
+  // an exact rename's source makes that rename ambiguous, so settle again
+  // without counterparts. Checked under probeOptions, so an unsettable owner
+  // is refused only in the plan that is kept.
+  const exact = (p: Plan): string[] =>
+    p.renameCandidates
+      .filter((c) => c.status === "unambiguous")
+      .map((c) => `${encodeId(c.from)}>${encodeId(c.to)}`);
+  let settledPlan: Plan | undefined;
+  if (counterparts.size > 0 && settle?.changed === true) {
+    settledPlan = plan(current, settle.factBase, probeOptions);
+    const kept = new Set(exact(settledPlan));
+    if (exact(probe).some((rename) => !kept.has(rename))) {
+      settle = await settleDesired(desiredPool, current, desired, {
+        only: touched,
+      });
+      settledPlan = undefined;
+    }
+  }
+  const settled = settle?.changed === true ? settle.factBase : desired;
+  // a plan made under probeOptions is kept only when those are the caller's own
+  const reusable =
+    probeOptions === options
+      ? settle?.changed === true
+        ? settledPlan
+        : probe
+      : undefined;
+  return {
+    plan: reusable ?? plan(current, settled, options),
+    desired: settled,
+    diagnostics: settle?.diagnostics ?? [],
   };
 }
 
