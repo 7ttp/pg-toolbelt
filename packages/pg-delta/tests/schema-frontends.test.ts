@@ -690,6 +690,27 @@ describe("public schema frontends", () => {
     });
   }, 120_000);
 
+  test("planSchemaFiles never loses an exact rename once a counterpart runs out of old names (#535)", async () => {
+    // s.added pairs only with s.gone, whose rename never lands; its own stable
+    // text then equals s.kept's, which would make s.kept -> s.renamed ambiguous.
+    const table = (name: string, dflt: number, check: string): string =>
+      `CREATE TABLE s.${name} (a int DEFAULT ${dflt}, b int, c int, CONSTRAINT ck CHECK (${check}));`;
+    const kept =
+      "a IS DISTINCT FROM 1 OR b IS DISTINCT FROM 2 OR c IS DISTINCT FROM 3";
+    const planned = await planAgainst(
+      "frontend_settle_x",
+      `CREATE SCHEMA s; ${table("kept", 2, kept)} ${table("gone", 1, "((a, b), c) IS DISTINCT FROM ((1, 2), 3)")}`,
+      `CREATE SCHEMA s; ${table("renamed", 2, kept)} ${table("added", 2, "(a, b) IS DISTINCT FROM (1, 2) OR c IS DISTINCT FROM 3")}`,
+    );
+    expect(sqlOf(planned)).toMatchInlineSnapshot(`
+      [
+        "DROP TABLE "s"."gone"",
+        "CREATE TABLE "s"."added" ("a" integer DEFAULT 2, "b" integer, "c" integer, CONSTRAINT "ck" CHECK ((((a IS DISTINCT FROM 1) OR (b IS DISTINCT FROM 2)) OR (c IS DISTINCT FROM 3))))",
+        "ALTER TABLE "s"."kept" RENAME TO "renamed"",
+      ]
+    `);
+  }, 120_000);
+
   test("planSchemaFiles never settles a name an ambiguous rename claims (#535)", async () => {
     // s.a1 and s.a2 both match s.t exactly; settling s.b must not single it out.
     const planned = await planAgainst(

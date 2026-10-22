@@ -615,8 +615,7 @@ export async function planSettled(
       ),
     });
     settledPlan = undefined;
-    const trying = active.filter((a) => !a.ownText);
-    if (trying.length === 0) break;
+    if (active.length === 0) break;
     settledPlan = plan(
       current,
       settle.changed ? settle.factBase : desired,
@@ -630,7 +629,9 @@ export async function planSettled(
       settledPlan = undefined;
       break;
     }
-    const missed = trying.filter(({ choice }) => !kept.has(choice.rename));
+    const missed = active.filter(
+      (a) => !a.ownText && !kept.has(a.choice.rename),
+    );
     if (missed.length === 0) break;
     for (const { i } of missed) picked[i] = (picked[i] ?? 0) + 1;
   }
