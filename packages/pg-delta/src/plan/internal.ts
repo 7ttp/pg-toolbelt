@@ -779,18 +779,22 @@ export function compactColumnFolds(
       // A same-table index (e.g. the unique index a self-referencing FK
       // targets) is emitted in the same file after the CREATE, so it is
       // equally unrepairable by file reordering.
-      if (foldTarget.kind !== "table") return false;
-      const sameTableColumn = predAction.produces.some(
-        (id) =>
-          id.kind === "column" &&
-          id.schema === foldTarget.schema &&
-          id.table === foldTarget.name,
-      );
-      // ADD COLUMN and CREATE INDEX both consume the table they belong to.
-      const sameTableDependent = predAction.consumes.some(
-        (id) => encodeId(id) === foldTargetKey,
-      );
-      return sameTableColumn || sameTableDependent;
+      if (foldTarget.kind === "table") {
+        const sameTableColumn = predAction.produces.some(
+          (id) =>
+            id.kind === "column" &&
+            id.schema === foldTarget.schema &&
+            id.table === foldTarget.name,
+        );
+        // ADD COLUMN and CREATE INDEX both consume the table they belong to.
+        const sameTableDependent = predAction.consumes.some(
+          (id) => encodeId(id) === foldTargetKey,
+        );
+        if (sameTableColumn || sameTableDependent) return true;
+      }
+      // A predecessor that itself needs the target (a CHECK calling a function
+      // over the table's row type) closes a cycle no file reordering can fix.
+      return actionReaches(edges, targetOrig, p);
     });
     if (crossesEdge) continue;
     // fold: splice the clause into the CREATE's column list
