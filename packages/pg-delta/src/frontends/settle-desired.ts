@@ -132,6 +132,28 @@ function deparsedOf(fact: Fact): string {
     .join(",");
 }
 
+/** The objects a fact's text reads. On older servers (seen on PG14/15) a
+ *  view's rewrite rule records a dependency on the view itself; that edge
+ *  points at the very text being compared, not at what it reads. */
+function refsOf(fb: FactBase, id: StableId): StableId[] {
+  const edges = [...fb.outgoingEdges(id)];
+  // A row filter's column dependencies are recorded on the publication, not
+  // on its member, and an inherited column resolves to whichever ancestor
+  // defines it, so no edge says which member it belongs to: take every
+  // column the publication's filters use.
+  if (id.kind === "publicationRel") {
+    edges.push(
+      ...fb
+        .outgoingEdges({ kind: "publication", name: id.publication })
+        .filter((edge) => edge.to.kind === "column"),
+    );
+  }
+  return edges
+    .filter((edge) => edge.kind === "depends")
+    .map((edge) => edge.to)
+    .filter((to) => encodeId(to) !== encodeId(id));
+}
+
 /** The StableId fields naming a table-like parent, which its rename changes. */
 const PARENT_FIELDS = new Set(["schema", "table", "target"]);
 
@@ -140,8 +162,10 @@ const PARENT_FIELDS = new Set(["schema", "table", "target"]);
  * parent that has its kind and own id fields (name, grantee, ...), or else, for
  * one identified by a name alone (Postgres may have generated it from the
  * table's), among those with its structure, the only one with its deparsed
- * text, or the only one left. Undefined unless every descendant on both sides
- * is paired: only then can settling make the subtrees match.
+ * text, the only one reading what is already paired, the only one with its
+ * name generated alike, or the only one left. Undefined unless every
+ * descendant on both sides is paired: only then can settling make the
+ * subtrees match.
  */
 function pairDescendants(
   current: FactBase,
@@ -178,6 +202,9 @@ function pairDescendants(
     const same = olds.find((f) => keyOf(f) === key);
     if (same !== undefined && structureOf(same) === structureOf(child)) {
       match(child, same);
+    } else if (same !== undefined) {
+      // the same child really changed, which no spelling settles
+      return undefined;
     } else if (byName(child)) {
       groupOf(child).wanted.push(child);
     }
@@ -185,20 +212,59 @@ function pairDescendants(
   for (const old of olds) {
     if (!taken.has(old) && byName(old)) groupOf(old).olds.push(old);
   }
+  // what a fact reads, as the target's ids: two respelled checks still differ
+  // in the columns they read
+  const usesOf = (fb: FactBase, f: Fact, oldOf?: Map<string, string>) =>
+    refsOf(fb, f.id)
+      .map((id) => oldOf?.get(encodeId(id)) ?? encodeId(id))
+      .sort()
+      .join(",");
+  // a constraint name Postgres generated from the table's, without the
+  // table's name; any other name is the user's own
+  const generatedOf = (f: Fact, parent: StableId): string => {
+    const name = "name" in f.id ? f.id.name : "";
+    const prefix = "name" in parent ? parent.name : "";
+    return f.id.kind === "constraint" && name.startsWith(prefix)
+      ? name.slice(prefix.length)
+      : name;
+  };
   for (const group of groups.values()) {
-    const only = (fs: Fact[], text: string): Fact | undefined => {
-      const found = fs.filter((f) => deparsedOf(f) === text);
-      return found.length === 1 ? found[0] : undefined;
-    };
-    const left = group.wanted.filter((child) => {
-      const text = deparsedOf(child);
-      const old = only(group.olds, text);
-      if (old === undefined || only(group.wanted, text) === undefined) {
-        return true;
-      }
-      match(child, old);
-      return false;
-    });
+    const matchBy = (
+      children: Fact[],
+      wantedKey: (f: Fact) => string,
+      oldKey: (f: Fact) => string,
+    ): Fact[] =>
+      children.filter((child) => {
+        const key = wantedKey(child);
+        const candidates = group.olds.filter(
+          (f) => !taken.has(f) && oldKey(f) === key,
+        );
+        if (
+          candidates.length !== 1 ||
+          children.filter((f) => wantedKey(f) === key).length !== 1
+        ) {
+          return true;
+        }
+        match(child, candidates[0]!);
+        return false;
+      });
+    const oldOf = new Map([
+      [encodeId(to), encodeId(from)],
+      ...matched.map(
+        ([child, old]) => [encodeId(child.id), encodeId(old.id)] as const,
+      ),
+    ]);
+    const byText = matchBy(group.wanted, deparsedOf, deparsedOf);
+    const byUses = matchBy(
+      byText,
+      (f) => usesOf(desired, f, oldOf),
+      (f) => usesOf(current, f),
+    );
+    const left = matchBy(
+      byUses,
+      (f) => generatedOf(f, to),
+      (f) => generatedOf(f, from),
+    );
     const leftOld = group.olds.filter((f) => !taken.has(f));
     if (left.length === 1 && leftOld.length === 1) {
       match(left[0]!, leftOld[0]!);
@@ -324,31 +390,10 @@ function sameContext(
     desired.has(id) &&
     current.hashOf(currentOf(id)) === desired.hashOf(id);
   if (fact.parent !== undefined && !unchanged(fact.parent)) return false;
-  // On older servers (seen on PG14/15) a view's rewrite rule records a
-  // dependency on the view itself; that edge points at the very text being
-  // compared, not at its context.
-  const refs = (fb: FactBase, id: StableId): StableId[] => {
-    const edges = [...fb.outgoingEdges(id)];
-    // A row filter's column dependencies are recorded on the publication, not
-    // on its member, and an inherited column resolves to whichever ancestor
-    // defines it, so no edge says which member it belongs to: take every
-    // column the publication's filters use.
-    if (id.kind === "publicationRel") {
-      edges.push(
-        ...fb
-          .outgoingEdges({ kind: "publication", name: id.publication })
-          .filter((edge) => edge.to.kind === "column"),
-      );
-    }
-    return edges
-      .filter((edge) => edge.kind === "depends")
-      .map((edge) => edge.to)
-      .filter((to) => encodeId(to) !== encodeId(id));
-  };
   const keyOf = (ids: StableId[]): string =>
     ids.map(encodeId).sort().join("\n");
-  const desiredRefs = refs(desired, fact.id);
-  if (keyOf(refs(current, before.id)) !== keyOf(desiredRefs.map(currentOf))) {
+  const desiredRefs = refsOf(desired, fact.id);
+  if (keyOf(refsOf(current, before.id)) !== keyOf(desiredRefs.map(currentOf))) {
     return false;
   }
   return desiredRefs.every(unchanged);

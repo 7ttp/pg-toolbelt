@@ -622,6 +622,30 @@ describe("public schema frontends", () => {
         "CREATE TABLE "s"."t2" ("a" integer, "b" integer, CONSTRAINT "ck" CHECK (((b >= 0) AND (b <= 11) AND (a >= 0))))",
       ]
     `);
+    // the columns swap types, so the check reads them differently
+    const swapped = await planAgainst(
+      "frontend_settle_cs",
+      "CREATE SCHEMA s; CREATE TABLE s.t1 (a int, b numeric, CHECK (a / 2 + b >= 0));",
+      "CREATE SCHEMA s; CREATE TABLE s.t2 (a numeric, b int, CHECK (a / 2 + b >= 0));",
+    );
+    // the columns are renamed too, which no table rename carries
+    const columnsRenamed = await planAgainst(
+      "frontend_settle_cn",
+      `CREATE SCHEMA s; CREATE TABLE s.t1 (a int, b int, t1_x int, t1_y int, CONSTRAINT ck CHECK (${flat(10)}));`,
+      `CREATE SCHEMA s; CREATE TABLE s.t2 (a int, b int, t2_x int, t2_y int, CONSTRAINT ck CHECK (${between(10)}));`,
+    );
+    expect(sqlOf(columnsRenamed)).toMatchInlineSnapshot(`
+      [
+        "DROP TABLE "s"."t1"",
+        "CREATE TABLE "s"."t2" ("a" integer, "b" integer, "t2_x" integer, "t2_y" integer, CONSTRAINT "ck" CHECK ((((b >= 0) AND (b <= 10)) AND (a >= 0))))",
+      ]
+    `);
+    expect(sqlOf(swapped)).toMatchInlineSnapshot(`
+      [
+        "DROP TABLE "s"."t1"",
+        "CREATE TABLE "s"."t2" ("a" numeric, "b" integer, CONSTRAINT "t2_check" CHECK ((((a / (2)::numeric) + (b)::numeric) >= (0)::numeric)))",
+      ]
+    `);
   }, 120_000);
 
   test("planSchemaFiles settles before refusing an owner the applier cannot set (#535)", async () => {
@@ -829,20 +853,60 @@ describe("public schema frontends", () => {
     });
   }, 120_000);
 
-  test("planSchemaFiles pairs unnamed checks by structure, then by text, across a rename (#535)", async () => {
-    const plan = (name: string, extra: string) =>
-      planAgainst(
-        name,
-        `CREATE SCHEMA s; CREATE TABLE s.t1 (a int, b int, CHECK (${flat(10)})${extra});`,
-        `CREATE SCHEMA s; CREATE TABLE s.t2 (a int, b int, CHECK (${between(10)})${extra});`,
+  test("planSchemaFiles pairs unnamed checks by structure, text, dependencies, then generated name, across a rename (#535)", async () => {
+    const plan = async (name: string, checks: string, renamed: string) =>
+      sqlOf(
+        await planAgainst(
+          name,
+          `CREATE SCHEMA s; CREATE TABLE s.t1 (a int, b int, c int, ${checks});`,
+          `CREATE SCHEMA s; CREATE TABLE s.t2 (a int, b int, c int, ${renamed});`,
+        ),
       );
-    expect(sqlOf(await plan("frontend_settle_u", ""))).toMatchInlineSnapshot(`
+    expect(
+      await plan(
+        "frontend_settle_u",
+        `CHECK (${flat(10)})`,
+        `CHECK (${between(10)})`,
+      ),
+    ).toMatchInlineSnapshot(`
       [
         "ALTER TABLE "s"."t1" RENAME TO "t2"",
       ]
     `);
-    expect(sqlOf(await plan("frontend_settle_u2", ", CHECK (a < 100)")))
-      .toMatchInlineSnapshot(`
+    // from here the target holds the nested spellings, so only the right
+    // pairs settle equal. Declared in another order: only the unrespelled
+    // one's text tells them apart
+    expect(
+      await plan(
+        "frontend_settle_u2",
+        `CHECK (${between(10)}), CHECK (a + b < 100)`,
+        `CHECK (a + b < 100), CHECK (${flat(10)})`,
+      ),
+    ).toMatchInlineSnapshot(`
+      [
+        "ALTER TABLE "s"."t1" RENAME TO "t2"",
+      ]
+    `);
+    // both respelled, in another order: only what each depends on
+    expect(
+      await plan(
+        "frontend_settle_u3",
+        `CHECK (${between(10)}), CHECK (c BETWEEN 0 AND 5 AND a <> 3)`,
+        `CHECK ((c >= 0) AND (c <= 5) AND (a <> 3)), CHECK (${flat(10)})`,
+      ),
+    ).toMatchInlineSnapshot(`
+      [
+        "ALTER TABLE "s"."t1" RENAME TO "t2"",
+      ]
+    `);
+    // both respelled, depending on the same columns: only the generated names
+    expect(
+      await plan(
+        "frontend_settle_u4",
+        `CHECK (${between(10)}), CHECK (b BETWEEN 1 AND 9 AND a <> 3)`,
+        `CHECK (${flat(10)}), CHECK ((b >= 1) AND (b <= 9) AND (a <> 3))`,
+      ),
+    ).toMatchInlineSnapshot(`
       [
         "ALTER TABLE "s"."t1" RENAME TO "t2"",
       ]
