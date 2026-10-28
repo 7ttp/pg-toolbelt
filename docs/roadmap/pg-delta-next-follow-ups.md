@@ -2163,7 +2163,9 @@ than dropped and recreated. These narrower gaps are deferred.
   `RENAME CONSTRAINT` behind on `main`. A column renamed along with its table
   is left behind the same way, as `main` already does without a check. A fix
   would reconcile child names after a parent rename, covered by an
-  apply-and-replan test.
+  apply-and-replan test. A corpus scenario with two unnamed checks waits on
+  this fix: until then the constraints keep the old table's name, so the
+  state proof fails.
 - **Respelled unnamed checks nothing tells apart.** Unnamed checks pair by
   shape, then by text, by what they read, then by their generated name. Two
   that are both respelled, read the same columns, and are declared in another
